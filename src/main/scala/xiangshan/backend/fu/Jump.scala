@@ -45,14 +45,17 @@ class JumpDataModule(implicit p: Parameters) extends XSModule {
 
   val isJalr = JumpOpType.jumpOpisJalr(func)
   val isAuipc = JumpOpType.jumpOpisAuipc(func)
+  // val isDasicsCallJ = JumpOpType.jumpOpIsDasicscallJ(func)
+  // val isDasicsCallJR = JumpOpType.jumpOpIsDasicscallJR(func)
   val offset = SignExt(ParallelMux(Seq(
-    isJalr -> ImmUnion.I.toImm32(immMin),
+    (isJalr/* || isDasicsCallJR*/) -> ImmUnion.I.toImm32(immMin),
     isAuipc -> ImmUnion.U.toImm32(immMin),
-    !(isJalr || isAuipc) -> ImmUnion.J.toImm32(immMin)
+    /*isDasicsCallJ -> ImmUnion.DIJ.toImm32(immMin),*/
+    !(isJalr || isAuipc /*|| isDasicsCallJ || isDasicsCallJR*/) -> ImmUnion.J.toImm32(immMin)
   )), XLEN)
 
   val snpc = pc + Mux(isRVC, 2.U, 4.U)
-  val target = Mux(JumpOpType.jumpOpisJalr(func), src1, pc) + offset // NOTE: src1 is (pc/rf(rs1)), src2 is (offset)
+  val target = Mux(isJalr /*|| isDasicsCallJR*/, src1, pc) + offset // NOTE: src1 is (pc/rf(rs1)), src2 is (offset)
 
   // RISC-V spec for JALR:
   // The target address is obtained by adding the sign-extended 12-bit I-immediate to the register rs1,

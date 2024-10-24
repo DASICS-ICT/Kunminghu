@@ -5,6 +5,7 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.{SignExt, ZeroExt}
 import xiangshan.HasXSParameter
+import xiangshan.backend.fu._
 import xiangshan.backend.fu.NewCSR.CSRBundles.{CauseBundle, PrivState}
 import xiangshan.backend.fu.NewCSR.CSRConfig._
 import xiangshan.backend.fu.NewCSR.CSRDefines.{HgatpMode, SatpMode}
@@ -15,7 +16,7 @@ trait CSREvents { self: NewCSR =>
 
   val trapEntryMEvent = Module(new TrapEntryMEventModule)
 
-  val trapEntryMNEvent = Module(new TrapEntryMNEventModule())
+  val trapEntryMNEvent = Module(new TrapEntryMNEventModule)
 
   val trapEntryHSEvent = Module(new TrapEntryHSEventModule)
 
@@ -114,7 +115,9 @@ trait CSREventBase {
   }
 }
 
-class TrapEntryEventInput(implicit val p: Parameters) extends Bundle with HasXSParameter {
+class TrapEntryEventInput(implicit val p: Parameters) extends Bundle
+  with HasXSParameter
+  with DasicsConst{
   val causeNO = Input(new CauseBundle)
   val trapPc = Input(UInt(VaddrMaxWidth.W))
   val trapPcGPA = Input(UInt(GPAddrBits.W))
@@ -148,6 +151,8 @@ class TrapEntryEventInput(implicit val p: Parameters) extends Bundle with HasXSP
   val memExceptionIsForVSnonLeafPTE = Input(Bool())
   val virtualInterruptIsHvictlInject = Input(Bool())
   val hvictlIID = Input(UInt(HIIDWidth.W))
+
+  val dasicsFaultReason = Input(UInt(DasicsFaultWidth.W))
 }
 
 trait EventSinkBundle { self: CSRModule[_ <: CSRBundle] =>

@@ -345,6 +345,8 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     uops(i).psrc(3) := io.v0ReadPorts(i)(0)
     uops(i).psrc(4) := io.vlReadPorts(i)(0)
 
+    uops(i).dasics_inst_info := io.in(i).bits.dasics_inst_info
+
     // int psrc2 should be bypassed from next instruction if it is fused
     if (i < RenameWidth - 1) {
       when (io.fusionInfo(i).rs2FromRs2 || io.fusionInfo(i).rs2FromRs1) {

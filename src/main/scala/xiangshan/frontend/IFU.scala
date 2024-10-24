@@ -27,6 +27,8 @@ import xiangshan.frontend.icache._
 import utils._
 import utility._
 import xiangshan.backend.fu.{PMPReqBundle, PMPRespBundle}
+import xiangshan.backend.fu.{DasicsFaultReason}
+import xiangshan.backend.fu.{DasicsRespBundle, DasicsRespDataBundle}
 import xiangshan.backend.GPAMemEntry
 import utility.ChiselDB
 
@@ -69,6 +71,15 @@ class UncacheInterface(implicit p: Parameters) extends XSBundle {
   val toUncache   = DecoupledIO( new InsUncacheReq )
 }
 
+class IFUDasicsIO(implicit p: Parameters) extends XSBundle {
+  // for tagger
+  val startAddr: UInt = Output(UInt(VAddrBits.W))
+  val notTrusted: Vec[Bool] = Input(Vec(FetchWidth * 2, Bool()))
+  // for branch checker
+  val lastBranch = ValidIO(UInt(VAddrBits.W))
+  val resp = Flipped(new DasicsRespBundle)
+}
+
 class NewIFUIO(implicit p: Parameters) extends XSBundle {
   val ftqInter         = new FtqInterface
   val icacheInter      = Flipped(new IFUICacheIO)
@@ -81,6 +92,7 @@ class NewIFUIO(implicit p: Parameters) extends XSBundle {
   val rob_commits      = Flipped(Vec(CommitWidth, Valid(new RobCommitInfo)))
   val iTLBInter        = new TlbRequestIO
   val pmp              = new ICachePMPBundle
+  val dasics              = new IFUDasicsIO
   val mmioCommitRead   = new mmioCommitRead
 }
 
@@ -336,7 +348,21 @@ class NewIFU(implicit p: Parameters) extends XSModule
 
   val f1_cut_ptr            = if(HasCExtension)  VecInit((0 until PredictWidth + 1).map(i =>  Cat(0.U(2.W), f1_ftq_req.startAddr(blockOffBits-1, 1)) + i.U ))
                                   else           VecInit((0 until PredictWidth).map(i =>     Cat(0.U(2.W), f1_ftq_req.startAddr(blockOffBits-1, 2)) + i.U ))
+  // create DASICS tags at IFU stage 1
+  io.dasics.startAddr := f1_ftq_req.startAddr
+  val f1_dasics_tag: Vec[Bool] = Wire(Vec(PredictWidth, Bool()))
+  if (HasCExtension) {
+    f1_dasics_tag := io.dasics.notTrusted
+  } else {  // not compressed, discard half of the tags
+    f1_dasics_tag.zipWithIndex.foreach { case (tag, i) => tag := io.dasics.notTrusted(i * 2) }
+  }
 
+  // for branch checker
+  io.dasics.lastBranch.valid := f1_ftq_req.lastBranch.valid
+  io.dasics.lastBranch.bits := f1_ftq_req.lastBranch.bits
+  val f1_dasics_br_resp = Wire(new DasicsRespDataBundle)
+  f1_dasics_br_resp.dasics_fault := io.dasics.resp.dasics_fault
+  f1_dasics_br_resp.mode := io.dasics.resp.mode
   /**
     ******************************************************************************
     * IFU Stage 2
@@ -476,7 +502,8 @@ class NewIFU(implicit p: Parameters) extends XSModule
   )})
   XSPerfAccumulate("fetch_bubble_icache_not_resp",   f2_valid && !icacheRespAllValid )
 
-
+  val f2_dasics_tag       = RegEnable(f1_dasics_tag, f1_fire)
+  val f2_dasics_br_resp  = RegEnable(f1_dasics_br_resp, f1_fire)
   /**
     ******************************************************************************
     * IFU Stage 3
@@ -555,6 +582,9 @@ class NewIFU(implicit p: Parameters) extends XSModule
   val f3_gpaddr         = RegEnable(f2_gpaddr,  f2_fire)
   val f3_isForVSnonLeafPTE        = RegEnable(f2_isForVSnonLeafPTE, f2_fire)
   val f3_resend_vaddr   = RegEnable(f2_resend_vaddr,             f2_fire)
+
+  val f3_dasics_tag     = RegEnable(f2_dasics_tag, f2_fire)
+  val f3_dasics_br_resp = RegEnable(f2_dasics_br_resp, f2_fire)
 
   // Expand 1 bit to prevent overflow when assert
   val f3_ftq_req_startAddr      = Cat(0.U(1.W), f3_ftq_req.startAddr)
@@ -847,7 +877,10 @@ class NewIFU(implicit p: Parameters) extends XSModule
     io.toIbuffer.bits.enqEnable := checkerOutStage1.fixedRange.asUInt & f3_instr_valid.asUInt & f3_lastHalf_mask
     io.toIbuffer.bits.valid     := f3_lastHalf_mask & f3_instr_valid.asUInt
   }
-
+  
+  io.toIbuffer.bits.dasicsUntrusted := f3_dasics_tag
+  io.toIbuffer.bits.dasicsBrResp := f3_dasics_br_resp
+  io.toIbuffer.bits.lastBranch := f3_ftq_req.lastBranch.bits
   /** to backend */
   // f3_gpaddr is valid iff gpf is detected
   io.toBackend.gpaddrMem_wen   := f3_toIbuffer_valid && Mux(

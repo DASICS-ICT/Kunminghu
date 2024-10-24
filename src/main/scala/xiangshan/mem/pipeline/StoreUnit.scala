@@ -24,6 +24,7 @@ import utility._
 import xiangshan.ExceptionNO._
 import xiangshan._
 import xiangshan.backend.Bundles.{MemExuInput, MemExuOutput}
+import xiangshan.backend.fu._
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.fu.FuConfig._
 import xiangshan.backend.fu.FuType._
@@ -32,9 +33,11 @@ import xiangshan.backend.fu.NewCSR._
 import xiangshan.cache.mmu.{TlbCmd, TlbReq, TlbRequestIO, TlbResp, Pbmt}
 import xiangshan.cache.{DcacheStoreRequestIO, DCacheStoreIO, MemoryOpConstants, HasDCacheParameters, StorePrefetchReq}
 
+
 class StoreUnit(implicit p: Parameters) extends XSModule
   with HasDCacheParameters
   with HasVLSUParameters
+  with DasicsConst
   {
   val io = IO(new Bundle() {
     val redirect        = Flipped(ValidIO(new Redirect))
@@ -69,6 +72,9 @@ class StoreUnit(implicit p: Parameters) extends XSModule
     val misalign_buf = Valid(new LsPipelineBundle)
     // trigger
     val fromCsrTrigger = Input(new CsrTriggerBundle)
+    //Dasics
+    val dasicsReq = ValidIO(new DasicsReqBundle())
+    val dasicsResp = Flipped(new DasicsRespBundle())
   })
 
   val s1_ready, s2_ready, s3_ready = WireInit(false.B)
@@ -377,6 +383,11 @@ class StoreUnit(implicit p: Parameters) extends XSModule
     s1_out.uop.debugInfo.tlbRespTime := GTimer()
   }
 
+  io.dasicsReq.valid := s1_fire 
+  io.dasicsReq.bits.addr := s1_in.vaddr
+  io.dasicsReq.bits.inUntrustedZone := s1_out.uop.dasicsUntrusted
+  io.dasicsReq.bits.operation := DasicsOp.write
+
   // Pipeline
   // --------------------------------------------------------------------------------
   // stage 2
@@ -415,7 +426,13 @@ class StoreUnit(implicit p: Parameters) extends XSModule
                                                 s2_pmp.st ||
                                                 (s2_in.isvec && s2_pmp.mmio && RegNext(s1_feedback.bits.hit))
                                                 ) && s2_vecActive
-    s2_out.uop.vpu.vstart     := s2_in.vecVaddrOffset >> s2_in.uop.vpu.veew
+  //Dasics store access fault
+  when (io.dasicsResp.dasics_fault > s2_in.uop.dasics_inst_info.FaultReason) { // DasicsFaultReason.StoreDasicsFault
+    s2_out.uop.exceptionVec(dasicsUCheckFault) := s2_in.uop.exceptionVec(dasicsUCheckFault) || io.dasicsResp.mode === ModeU
+    // s2_out.uop.exceptionVec(dasicsSCheckFault) := s2_in.uop.exceptionVec(dasicsSCheckFault) || io.dasicsResp.mode === ModeS
+    s2_out.uop.dasics_inst_info.FaultReason := io.dasicsResp.dasics_fault
+  }
+  s2_out.uop.vpu.vstart     := s2_in.vecVaddrOffset >> s2_in.uop.vpu.veew
 
   // kill dcache write intent request when mmio or exception
   io.dcache.s2_kill := (s2_mmio || s2_exception || s2_in.uop.robIdx.needFlush(io.redirect))

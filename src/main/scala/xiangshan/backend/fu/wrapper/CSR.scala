@@ -7,7 +7,7 @@ import utility._
 import xiangshan._
 import xiangshan.backend.fu.NewCSR._
 import xiangshan.backend.fu.util._
-import xiangshan.backend.fu.{FuConfig, FuncUnit}
+import xiangshan.backend.fu.{FuConfig, FuncUnit, DasicsConst}
 import device._
 import system.HasSoCParameter
 import xiangshan.ExceptionNO._
@@ -19,6 +19,7 @@ import xiangshan.frontend.FtqPtr
 
 class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   with HasCircularQueuePtrHelper
+  with DasicsConst
 {
   val csrIn = io.csrio.get
   val csrOut = io.csrio.get
@@ -102,6 +103,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       in.bits.mnret := isMNret
       in.bits.sret := isSret
       in.bits.dret := isDret
+      in.bits.dasics_inst_info :=io.in.bits.dasics_inst_info
   }
   csrMod.io.trapInst := trapInstMod.io.currentTrapInst
   csrMod.io.fetchMalTval := trapTvalMod.io.tval
@@ -116,6 +118,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   // Todo: shrink the width of trap vector.
   // We use 64bits trap vector in CSR, and 24 bits exceptionVec in exception bundle.
   csrMod.io.fromRob.trap.bits.trapVec := csrIn.exception.bits.exceptionVec.asUInt
+  csrMod.io.fromRob.trap.bits.dasicsFaultReason := csrIn.exception.bits.dasicsFaultReason
   csrMod.io.fromRob.trap.bits.isFetchBkpt := csrIn.exception.bits.isFetchBkpt
   csrMod.io.fromRob.trap.bits.singleStep := csrIn.exception.bits.singleStep
   csrMod.io.fromRob.trap.bits.crossPageIPFFix := csrIn.exception.bits.crossPageIPFFix
@@ -350,6 +353,19 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       custom.mem_trigger      := csrMod.io.status.memTrigger
       // virtual mode
       custom.virtMode := csrMod.io.status.privState.V.asBool
+      // dasics
+      custom.dasics.mode := csrMod.io.status.privState
+      custom.dasics.dmcfg := csrMod.io.status.custom.dasics.dmcfg
+      custom.dasics.dumboundhi := csrMod.io.status.custom.dasics.dumboundhi
+      custom.dasics.dumboundlo := csrMod.io.status.custom.dasics.dumboundlo
+      custom.dasics.dlcfg := csrMod.io.status.custom.dasics.dlcfg
+      custom.dasics.djcfg := csrMod.io.status.custom.dasics.djcfg
+      custom.dasics.dmaincall := csrMod.io.status.custom.dasics.dmaincall
+      custom.dasics.dretpc := csrMod.io.status.custom.dasics.dretpc
+      custom.dasics.dretpcfz := csrMod.io.status.custom.dasics.dretpcfz
+      custom.dasics.dfreason := csrMod.io.status.custom.dasics.dfreason
+      for (i <- 0 until NumDasicsMemBounds*2) custom.dasics.dlbound(i) := csrMod.io.status.custom.dasics.dlbound(i)
+      for (i <- 0 until NumDasicsJmpBounds*2) custom.dasics.djbound(i) := csrMod.io.status.custom.dasics.djbound(i)
   }
 
   csrOut.instrAddrTransType := csrMod.io.status.instrAddrTransType
@@ -411,6 +427,13 @@ class CSRToDecode(implicit p: Parameters) extends XSBundle {
      * raise EX_II when VS=Off
      */
     val vsIsOff = Bool()
+
+    /**
+     * decode all dasics inst
+     * raise EX_II when dasics is not enable
+     */
+
+    val dasicsIsOff = Bool()
 
     /**
      * illegal wfi

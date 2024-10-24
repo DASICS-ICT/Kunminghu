@@ -23,6 +23,7 @@ import utils._
 import utility._
 import xiangshan._
 import xiangshan.backend.fu.{PFEvent, PMP, PMPChecker, PMPReqBundle}
+import xiangshan.backend.fu.{DasicsTagger, DasicsBranchChecker}
 import xiangshan.cache.mmu._
 import xiangshan.frontend.icache._
 
@@ -121,6 +122,21 @@ class FrontendInlinedImp (outer: FrontendInlined) extends LazyModuleImp(outer)
   }
   (0 until 2 * PortNumber).foreach(i => icache.io.pmp(i).resp <> pmp_check(i).resp)
   ifu.io.pmp.resp <> pmp_check.last.resp
+
+  // DasicsTagger
+  val dasicsTagger: DasicsTagger = Module(new DasicsTagger())
+  dasicsTagger.io.dasicsinfo := csrCtrl.dasics
+  dasicsTagger.io.mode := tlbCsr.priv.imode
+  dasicsTagger.io.addr := ifu.io.dasics.startAddr
+  ifu.io.dasics.notTrusted := dasicsTagger.io.notTrusted
+  // dasics branch checker
+  val dasicsBrChecker: DasicsBranchChecker = Module(new DasicsBranchChecker())
+  dasicsBrChecker.io.dasicsinfo := csrCtrl.dasics
+  dasicsBrChecker.io.mode := tlbCsr.priv.imode
+  dasicsBrChecker.io.valid := ifu.io.dasics.lastBranch.valid
+  dasicsBrChecker.io.lastBranch := ifu.io.dasics.lastBranch.bits
+  dasicsBrChecker.io.target := ifu.io.dasics.startAddr
+  ifu.io.dasics.resp := dasicsBrChecker.io.resp
 
   val itlb = Module(new TLB(coreParams.itlbPortNum, nRespDups = 1,
     Seq.fill(PortNumber)(false) ++ Seq(true), itlbParams))

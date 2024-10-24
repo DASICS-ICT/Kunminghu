@@ -24,7 +24,7 @@ import xiangshan.frontend.icache._
 import utils._
 import utility._
 import xiangshan.cache.mmu.TlbResp
-import xiangshan.backend.fu.PMPRespBundle
+import xiangshan.backend.fu.{DasicsRespDataBundle,PMPRespBundle}
 
 import scala.math._
 import java.util.ResourceBundle.Control
@@ -45,6 +45,9 @@ class FetchRequestBundle(implicit p: Parameters) extends XSBundle with HasICache
   val ftqOffset       = ValidUndirectioned(UInt(log2Ceil(PredictWidth).W))
 
   val topdown_info    = new FrontendTopDownBundle
+
+  // last branch for dasics check
+  val lastBranch: ValidUndirectioned[UInt] = ValidUndirectioned(UInt(VAddrBits.W))
 
   def crossCacheline =  startAddr(blockOffBits - 1) === 1.U
 
@@ -257,6 +260,10 @@ class FetchToIBuffer(implicit p: Parameters) extends XSBundle {
   val illegalInstr = Vec(PredictWidth, Bool())
   val triggered    = Vec(PredictWidth, TriggerAction())
   val isLastInFtqEntry = Vec(PredictWidth, Bool())
+
+  val dasicsUntrusted = Vec(PredictWidth, Bool())
+  val dasicsBrResp = new DasicsRespDataBundle  // last branch to this instr block is illegal
+  val lastBranch: UInt = UInt(VAddrBits.W)
 
   val pc        = Vec(PredictWidth, UInt(VAddrBits.W))
   val ftqPtr       = new FtqPtr

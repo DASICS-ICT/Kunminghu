@@ -6,9 +6,10 @@ import difftest._
 import freechips.rocketchip.rocket.CSRs
 import org.chipsalliance.cde.config.Parameters
 import top.{ArgParser, Generator}
-import utility.{DataHoldBypass, DelayN, GatedValidRegNext, RegNextWithEnable, SignExt, ZeroExt, HPerfMonitor, PerfEvent}
+import utility.{DataHoldBypass, DelayN, GatedValidRegNext, HPerfMonitor, PerfEvent, RegNextWithEnable, SignExt, ZeroExt}
 import utils.OptionWrapper
-import xiangshan.backend.fu.NewCSR.CSRBundles.{CSRCustomState, PrivState, RobCommitCSR}
+import xiangshan.backend.fu._
+import xiangshan.backend.fu.NewCSR.CSRBundles.{CSRCustomState, CSRDasicsState, PrivState, RobCommitCSR}
 import xiangshan.backend.fu.NewCSR.CSRDefines._
 import xiangshan.backend.fu.NewCSR.CSREnumTypeImplicitCast._
 import xiangshan.backend.fu.NewCSR.CSREvents.{CSREvents, DretEventSinkBundle, EventUpdatePrivStateOutput, MNretEventSinkBundle, MretEventSinkBundle, SretEventSinkBundle, TargetPCBundle, TrapEntryDEventSinkBundle, TrapEntryEventInput, TrapEntryHSEventSinkBundle, TrapEntryMEventSinkBundle, TrapEntryMNEventSinkBundle, TrapEntryVSEventSinkBundle}
@@ -18,7 +19,7 @@ import xiangshan.backend.fu.vector.Bundles.{Vl, Vstart, Vxrm, Vxsat}
 import xiangshan.backend.fu.wrapper.CSRToDecode
 import xiangshan.backend.rob.RobPtr
 import xiangshan._
-import xiangshan.backend.fu.PerfCounterIO
+import xiangshan.backend.fu.{DasicsConst, PerfCounterIO}
 import xiangshan.ExceptionNO._
 
 import scala.collection.immutable.SeqMap
@@ -81,6 +82,7 @@ class NewCSRInput(implicit p: Parameters) extends Bundle {
   val mret = Input(Bool())
   val sret = Input(Bool())
   val dret = Input(Bool())
+  val dasics_inst_info = Input(new DasicsInstInfo)
 }
 
 class NewCSROutput(implicit p: Parameters) extends Bundle {
@@ -93,6 +95,7 @@ class NewCSROutput(implicit p: Parameters) extends Bundle {
   val regOut = UInt(64.W)
   // perf
   val isPerfCnt = Bool()
+  val dasics_inst_info = Input(new DasicsInstInfo)
 }
 
 class NewCSR(implicit val p: Parameters) extends Module
@@ -108,6 +111,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   with CSREvents
   with DebugLevel
   with CSRCustom
+  with DasicsConst
+  with CSRDasics
   with CSRPMP
   with IpIeAliasConnect
 {
@@ -132,6 +137,7 @@ class NewCSR(implicit val p: Parameters) extends Module
         val pcGPA = UInt(VaddrMaxWidth.W)
         val instr = UInt(InstWidth.W)
         val trapVec = UInt(64.W)
+        val dasicsFaultReason = UInt(DasicsFaultWidth.W)
         val isFetchBkpt = Bool()
         val singleStep = Bool()
         val trigger = TriggerAction()
@@ -231,6 +237,7 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   val hasTrap = io.fromRob.trap.valid
   val trapVec = io.fromRob.trap.bits.trapVec
+  val dasicsFaultReason = io.fromRob.trap.bits.dasicsFaultReason
   val trapPC = io.fromRob.trap.bits.pc
   val trapPCGPA = io.fromRob.trap.bits.pcGPA
   val trapIsInterrupt = io.fromRob.trap.bits.isInterrupt
@@ -278,7 +285,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     debugCSRMap ++
     aiaCSRMap ++
     customCSRMap ++
-    pmpCSRMap
+    pmpCSRMap ++
+    dasicsCSRMap
 
   val csrMods: Seq[CSRModule[_]] =
     machineLevelCSRMods ++
@@ -289,7 +297,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     debugCSRMods ++
     aiaCSRMods ++
     customCSRMods ++
-    pmpCSRMods
+    pmpCSRMods ++
+    dasicsCSRMods
 
   var csrOutMap: SeqMap[Int, UInt] =
     machineLevelCSROutMap ++
@@ -300,7 +309,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     debugCSROutMap ++
     aiaCSROutMap ++
     customCSROutMap ++
-    pmpCSROutMap
+    pmpCSROutMap ++
+    dasicsCSROutMap
 
   // interrupt
   val nmip = RegInit(new NonMaskableIRPendingBundle, (new NonMaskableIRPendingBundle).init)
@@ -351,6 +361,7 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   trapHandleMod.io.in.trapInfo.valid := hasTrap
   trapHandleMod.io.in.trapInfo.bits.trapVec := trapVec.asUInt
+  trapHandleMod.io.in.trapInfo.bits.dasicsFaultReason := dasicsFaultReason
   trapHandleMod.io.in.trapInfo.bits.nmi := nmi
   trapHandleMod.io.in.trapInfo.bits.intrVec := intrVec
   trapHandleMod.io.in.trapInfo.bits.isInterrupt := trapIsInterrupt
@@ -369,7 +380,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   val entryPrivState = trapHandleMod.io.out.entryPrivState
   val entryDebugMode = WireInit(false.B)
 
-  // PMP
+  // PMP                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          Q
   val pmpEntryMod = Module(new PMPEntryHandleModule)
   pmpEntryMod.io.in.pmpCfg  := cfgs.map(_.regOut.asInstanceOf[PMPCfgBundle])
   pmpEntryMod.io.in.pmpAddr := pmpaddr.map(_.regOut.asInstanceOf[PMPAddrBundle])
@@ -408,7 +419,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   permitMod.io.in.sret  := io.in.bits.sret  && valid
   permitMod.io.in.dret  := io.in.bits.dret  && valid
   permitMod.io.in.csrIsCustom := customCSRMods.map(_.addr.U === addr).reduce(_ || _).orR
-
+  permitMod.io.in.DasicsUntrusted := io.in.bits.dasics_inst_info.Untrusted
   permitMod.io.in.status.tsr := mstatus.regOut.TSR.asBool
   permitMod.io.in.status.vtsr := hstatus.regOut.VTSR.asBool
 
@@ -664,6 +675,7 @@ class NewCSR(implicit val p: Parameters) extends Module
     eMod.in match {
       case in: TrapEntryEventInput =>
         in.causeNO := trapHandleMod.io.out.causeNO
+        in.dasicsFaultReason := trapHandleMod.io.out.dasicsFaultReason
         in.trapPc := trapPC
         in.trapPcGPA := trapPCGPA // only used by trapEntryMEvent & trapEntryHSEvent
         in.trapInst := io.trapInst
@@ -1143,6 +1155,19 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.status.instrAddrTransType.sv48x4 := privState.isVirtual && vsatp.regOut.MODE === SatpMode.Bare && hgatp.regOut.MODE === HgatpMode.Sv48x4
   assert(PopCount(io.status.instrAddrTransType.asUInt) === 1.U, "Exactly one inst trans type should be asserted")
 
+  // io dasics connection
+  io.status.custom.dasics.dmcfg := dumcfg.regOut
+  io.status.custom.dasics.dumboundlo := dumboundlo.regOut
+  io.status.custom.dasics.dumboundhi := dumboundhi.regOut
+  io.status.custom.dasics.dlcfg := dlcfg.regOut
+  io.status.custom.dasics.djcfg := djcfg.regOut
+  io.status.custom.dasics.dmaincall := dmaincall.regOut
+  io.status.custom.dasics.dretpc := dretpc.regOut
+  io.status.custom.dasics.dretpcfz := dretpcfz.regOut
+  io.status.custom.dasics.dfreason := dfreason.regOut
+  for (i <- 0 until NumDasicsMemBounds*2) io.status.custom.dasics.dlbound(i) := dlbound(i).regOut
+  for (i <- 0 until NumDasicsJmpBounds*2) io.status.custom.dasics.djbound(i) := djbound(i).regOut
+
   private val csrAccess = wenLegal || ren
 
   private val imsicAddrValid =
@@ -1219,6 +1244,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.toDecode.virtualInst.hlsv       := isModeVS || isModeVU
   io.toDecode.illegalInst.fsIsOff    := mstatus.regOut.FS === ContextStatus.Off || (isModeVS || isModeVU) && vsstatus.regOut.FS === ContextStatus.Off
   io.toDecode.illegalInst.vsIsOff    := mstatus.regOut.VS === ContextStatus.Off || (isModeVS || isModeVU) && vsstatus.regOut.VS === ContextStatus.Off
+  io.toDecode.illegalInst.dasicsIsOff   := Mux(isModeHU, !dumcfg.regOut.UENA, false.B)
+
   io.toDecode.illegalInst.wfi        := isModeHU || !isModeM && mstatus.regOut.TW
   io.toDecode.virtualInst.wfi        := isModeVS && !mstatus.regOut.TW && hstatus.regOut.VTW || isModeVU && !mstatus.regOut.TW
   io.toDecode.illegalInst.frm        := frmIsReserved

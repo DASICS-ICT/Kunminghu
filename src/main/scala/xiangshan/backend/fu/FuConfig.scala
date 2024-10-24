@@ -227,7 +227,8 @@ object FuConfig {
     ),
     piped = true,
     writeIntRf = true,
-    immType = Set(SelImm.IMM_I, SelImm.IMM_UJ, SelImm.IMM_U),
+    immType = Set(SelImm.IMM_I, SelImm.IMM_UJ, SelImm.IMM_U, SelImm.IMM_DIJ),
+    exceptionOut = Seq(illegalInstr, dasicsUCheckFault, dasicsSCheckFault)
   )
 
   val BrhCfg: FuConfig = FuConfig (
@@ -299,7 +300,7 @@ object FuConfig {
     piped = false,
     writeIntRf = true,
     latency = UncertainLatency(),
-    exceptionOut = Seq(illegalInstr, virtualInstr, breakPoint, ecallU, ecallS, ecallVS, ecallM),
+    exceptionOut = Seq(illegalInstr, virtualInstr, breakPoint, ecallU, ecallS, ecallVS, ecallM, dasicsUCheckFault, dasicsSCheckFault),
     flushPipe = true,
   )
 
@@ -419,7 +420,7 @@ object FuConfig {
     writeIntRf = true,
     writeFpRf = true,
     latency = UncertainLatency(3),
-    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault, breakPoint),
+    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault, breakPoint, dasicsUCheckFault, dasicsSCheckFault),
     flushPipe = true,
     replayInst = true,
     hasLoadError = true,
@@ -436,7 +437,7 @@ object FuConfig {
     ),
     piped = false,
     latency = UncertainLatency(),
-    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault, breakPoint),
+    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault, breakPoint, dasicsUCheckFault, dasicsSCheckFault),
     flushPipe = true,
     trigger = true,
     immType = Set(SelImm.IMM_S),
@@ -465,7 +466,7 @@ object FuConfig {
     writeIntRf = true,
     writeFpRf = true,
     latency = UncertainLatency(3),
-    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault),
+    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault, dasicsUCheckFault, dasicsSCheckFault),
     flushPipe = true,
     replayInst = true,
     hasLoadError = true,

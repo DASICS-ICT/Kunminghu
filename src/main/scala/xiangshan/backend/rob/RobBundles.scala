@@ -36,7 +36,7 @@ import xiangshan.backend.fu.NewCSR.CSREvents.TargetPCBundle
 import xiangshan.backend.fu.vector.Bundles.{Nf, VLmul, VSew, VType}
 import xiangshan.backend.rename.SnapshotGenerator
 import xiangshan.backend.trace._
-
+import xiangshan.backend.fu.DasicsConst
 import scala.collection.immutable.Nil
 
 
@@ -276,7 +276,7 @@ class RobDebugRollingIO extends Bundle {
   val robTrueCommit = Output(UInt(64.W))
 }
 
-class RobExceptionInfo(implicit p: Parameters) extends XSBundle {
+class RobExceptionInfo(implicit p: Parameters) extends XSBundle with DasicsConst{
   // val valid = Bool()
   val robIdx = new RobPtr
   val ftqPtr = new FtqPtr
@@ -287,6 +287,7 @@ class RobExceptionInfo(implicit p: Parameters) extends XSBundle {
   // 0: is execute exception, 1: is fetch exception
   val isEnqExcp = Bool()
   val exceptionVec = ExceptionVec()
+  val dasicsFaultReason = UInt(DasicsFaultWidth.W)
   val isFetchMalAddr = Bool()
   val flushPipe = Bool()
   val isVset = Bool()

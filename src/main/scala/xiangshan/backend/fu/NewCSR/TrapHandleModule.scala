@@ -3,6 +3,7 @@ package xiangshan.backend.fu.NewCSR
 import chisel3._
 import chisel3.util._
 import xiangshan.ExceptionNO
+import xiangshan.backend.fu._
 import xiangshan.backend.fu.NewCSR.CSRBundles.{CauseBundle, PrivState, XtvecBundle}
 import xiangshan.backend.fu.NewCSR.CSRDefines.XtvecMode
 import xiangshan.backend.fu.NewCSR.CSRBundleImplicitCast._
@@ -30,6 +31,8 @@ class TrapHandleModule extends Module {
   private val intrVec = io.in.trapInfo.bits.intrVec
   private val hasEXVec = Mux(hasEX, exceptionVec, 0.U)
   private val hasIRVec = Mux(hasIR, intrVec, 0.U)
+
+  private val dasicsFaultReason = trapInfo.bits.dasicsFaultReason
 
   private val interruptGroups: Seq[(Seq[Int], String)] = Seq(
     InterruptNO.customHighestGroup    -> "customHighest",
@@ -129,6 +132,7 @@ class TrapHandleModule extends Module {
     handleTrapUnderHS -> PrivState.ModeHS,
   ))
 
+  io.out.dasicsFaultReason := dasicsFaultReason
   io.out.causeNO.Interrupt := hasIR
   io.out.causeNO.ExceptionCode := causeNO
   io.out.pcFromXtvec := pcFromXtvec
@@ -163,10 +167,11 @@ class TrapHandleModule extends Module {
   }
 }
 
-class TrapHandleIO extends Bundle {
+class TrapHandleIO extends Bundle with DasicsConst{
   val in = Input(new Bundle {
     val trapInfo = ValidIO(new Bundle {
       val trapVec = UInt(64.W)
+      val dasicsFaultReason = UInt(DasicsFaultWidth.W)
       val nmi = Bool()
       val intrVec = UInt(64.W)
       val isInterrupt = Bool()
@@ -190,6 +195,7 @@ class TrapHandleIO extends Bundle {
   val out = new Bundle {
     val entryPrivState = new PrivState
     val causeNO = new CauseBundle
+    val dasicsFaultReason = UInt(DasicsFaultWidth.W)
     val pcFromXtvec = UInt()
   }
 }

@@ -6,8 +6,9 @@ import chisel3.util.experimental.decode.TruthTable
 import freechips.rocketchip.rocket.CSRs
 import xiangshan.backend.fu.NewCSR.CSRBundles.{Counteren, PrivState}
 import xiangshan.backend.fu.NewCSR.CSRDefines._
+import xiangshan.backend.fu.DasicsConst
 
-class CSRPermitModule extends Module {
+class CSRPermitModule extends Module with DasicsConst{
   val io = IO(new CSRPermitIO)
 
   private val (ren, wen, addr, privState, debugMode) = (
@@ -263,11 +264,19 @@ class CSRPermitModule extends Module {
    * AIA end
    */
 
+  // DASICS privilege check
+  private val Dasics_EX_II  = csrAccess && (
+      (isUDasics(addr) && (privState.isVirtual || privState.isModeHU && io.in.DasicsUntrusted)) || // M, HS, HU trusted
+      (isSDasics(addr) && (privState.isVirtual || privState.isModeHU)) // only M and HS
+//        || (isUDasics(addr) || isSDasics(addr)) && ...  <- reserved
+  )
+
+
   // Todo: check correct
   io.out.EX_II :=  csrAccess && !privilegeLegal && (!privState.isVirtual || privState.isVirtual && csrIsM) ||
     rwIllegal || mnret_EX_II || mret_EX_II || sret_EX_II || rwSatp_EX_II || accessHPM_EX_II ||
     rwStimecmp_EX_II || rwCustom_EX_II || fpVec_EX_II || dret_EX_II || xstateControlAccess_EX_II || rwStopei_EX_II ||
-    rwMireg_EX_II || rwSireg_EX_II || rwVSireg_EX_II
+    rwMireg_EX_II || rwSireg_EX_II || rwVSireg_EX_II || Dasics_EX_II
   io.out.EX_VI := (csrAccess && !privilegeLegal && privState.isVirtual && !csrIsM ||
     mnret_EX_VI || mret_EX_VI || sret_EX_VI || rwSatp_EX_VI || accessHPM_EX_VI || rwStimecmp_EX_VI || rwSireg_EX_VI || rwSip_Sie_EX_VI) && !rwIllegal || xstateControlAccess_EX_VI
 
@@ -340,6 +349,7 @@ class CSRPermitIO extends Bundle {
       val mvienSEIE = Bool()
       val hvictlVTI = Bool()
     }
+    val DasicsUntrusted = Bool()
   })
 
   val out = Output(new Bundle {

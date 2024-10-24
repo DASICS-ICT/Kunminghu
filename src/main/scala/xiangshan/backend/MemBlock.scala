@@ -435,6 +435,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
     loadMisalignBuffer.io.writeBack.valid,
     loadMisalignBuffer.io.writeBack.bits,
     Mux(
+    Mux(
       atomicsUnit.io.out.valid,
       atomicsUnit.io.out.bits,
       loadUnits.head.io.ldout.bits
@@ -678,6 +679,29 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   val itlbRepeater3 = PTWRepeaterNB(passReady = false, itlbParams.fenceDelay, io.fetch_to_mem.itlb, ptw.io.tlb(0), sfence, tlbcsr)
 
   lsq.io.debugTopDown.robHeadMissInDTlb := dtlbRepeater.io.rob_head_miss_in_tlb
+
+  // Dasics
+  val memDasicsReq  = storeUnits.map(_.io.dasicsReq) ++ loadUnits.map(_.io.dasicsReq)
+  val memDasicsResp = storeUnits.map(_.io.dasicsResp) ++ loadUnits.map(_.io.dasicsResp)
+
+  memDasicsResp.map{resp =>
+    resp.mode := csrCtrl.dasics.mode
+    resp.dasics_fault := DasicsFaultReason.noDasicsFault
+  }
+    val dmconverter = Module(new DasicsMemConverter())
+    dmconverter.io.dasicsinfo <> csrCtrl.dasics
+  
+    val dmcheckers = VecInit(Seq.fill(backendParams.LduCnt + backendParams.StaCnt)(
+      Module(new DasicsMemChecker()).io
+    )) //TODO: general dasics check port config
+
+    for( (dmchecker,index) <- dmcheckers.zipWithIndex){
+      dmchecker.mode := dmconverter.io.mode
+      dmchecker.resource := dmconverter.io.entries
+      dmchecker.mainCfg  := dmconverter.io.maincfg
+      dmchecker.req := memDasicsReq(index)
+      memDasicsResp(index) := dmchecker.resp
+    }
 
   // pmp
   val pmp = Module(new PMP())

@@ -410,6 +410,22 @@ object FpDecode extends DecodeConstants{
   )
 }
 
+// object DasicsDecode extends DecodeConstants {
+//   val decodeArray: Array[(BitPat, XSDecodeBase)] = Array(
+//     DASICSCALL_J -> XSDecode(SrcType.pc , SrcType.imm, SrcType.X, FuType.jmp, JumpOpType.dasicscall_j  , SelImm.IMM_DIJ, xWen = T),
+//     DASICSCALL_JR-> XSDecode(SrcType.reg, SrcType.imm, SrcType.X, FuType.jmp, JumpOpType.dasicscall_jr , SelImm.IMM_I , xWen = T),
+//   )
+// }
+
+/**
+  * N extension (user-level interrupts) Decode constants
+  */
+// object NDecode extends DecodeConstants {
+//   val decodeArray: Array[(BitPat, XSDecodeBase)] = Array(
+//     URET -> XSDecode(SrcType.reg, SrcType.imm, SrcType.X, FuType.csr, CSROpType.jmp, SelImm.IMM_I, xWen = T, noSpec = T, blockBack = T),
+//   )
+// }
+
 /**
  * FP Divide SquareRoot Constants
  */
@@ -715,6 +731,7 @@ object ImmUnion {
   val U = Imm_U()
   val J = Imm_J()
   val Z = Imm_Z()
+  val DIJ = Imm_DIJ()
   val B6 = Imm_B6()
   val OPIVIS = Imm_OPIVIS()
   val OPIVIU = Imm_OPIVIU()
@@ -724,7 +741,7 @@ object ImmUnion {
   val VRORVI = Imm_VRORVI()
 
   // do not add special type lui32 to this, keep ImmUnion max len being 20.
-  val imms = Seq(I, S, B, U, J, Z, B6, OPIVIS, OPIVIU, VSETVLI, VSETIVLI, VRORVI)
+  val imms = Seq(I, S, B, U, J, Z, DIJ, B6, OPIVIS, OPIVIU, VSETVLI, VSETIVLI, VRORVI)
   val maxLen = imms.maxBy(_.len).len
   val immSelMap = Seq(
     SelImm.IMM_I,
@@ -733,6 +750,7 @@ object ImmUnion {
     SelImm.IMM_U,
     SelImm.IMM_UJ,
     SelImm.IMM_Z,
+    SelImm.IMM_DIJ,
     SelImm.IMM_B6,
     SelImm.IMM_OPIVIS,
     SelImm.IMM_OPIVIU,
@@ -797,7 +815,9 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
     VecDecoder.table ++
     ZicondDecode.table ++
     ZimopDecode.table ++
-    ZfaDecode.table
+    ZfaDecode.table ++
+    DasicsDecode.table 
+    // ++ NDecode.table
 
   require(decode_table.map(_._2.length == 15).reduce(_ && _), "Decode tables have different column size")
   // assertion for LUI: only LUI should be assigned `selImm === SelImm.IMM_U && fuType === FuType.alu`
@@ -845,7 +865,13 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
   decodedInst.lsrc(4) := Vl_IDX.U
 
   // read dest location
-  decodedInst.ldest := inst.RD
+  // val isDasicsCallJ = (ctrl_flow.instr === DASICSCALL_J)
+  // when (isDasicsCallJ) {
+  //   decodedInst.ldest := 0x1.U
+  // }
+  // .otherwise{
+    decodedInst.ldest := inst.RD
+  // }
 
   // init v0Wen vlWen
   decodedInst.v0Wen := false.B
@@ -898,7 +924,13 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
     io.fromCSR.virtualInst.cboI       && isCboInval
 
 
-  decodedInst.exceptionVec(illegalInstr) := exceptionII || io.enq.ctrlFlow.exceptionVec(EX_II)
+  // dasics decode check
+  private val illegalDasics = /*((ctrl_flow.instr === DASICSCALL_JR || ctrl_flow.instr === DASICSCALL_J) && (io.fromCSR.illegalInst.dasicsIsOff || ctrl_flow.dasicsUntrusted)) || */
+                            // no dasicscall currently in KMH design
+                            (FuType.isVector(decodedInst.fuType) && !io.fromCSR.illegalInst.dasicsIsOff && ctrl_flow.dasicsUntrusted) 
+                            // no vector when dasics enable and in untrusted zone
+
+  decodedInst.exceptionVec(illegalInstr) := exceptionII || io.enq.ctrlFlow.exceptionVec(EX_II) || illegalDasics
   decodedInst.exceptionVec(virtualInstr) := exceptionVI
 
   //update exceptionVec: from frontend trigger's breakpoint exception. To reduce 1 bit of overhead in ibuffer entry.

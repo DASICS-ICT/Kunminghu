@@ -35,6 +35,7 @@ import xiangshan.cache._
 import xiangshan.cache.wpu.ReplayCarry
 import xiangshan.cache.mmu._
 import xiangshan.mem.mdp._
+import xiangshan.backend.fu.{DasicsReqBundle,DasicsRespBundle,DasicsOp,DasicsConst,DasicsFaultReason}
 
 class LoadToLsqReplayIO(implicit p: Parameters) extends XSBundle
   with HasDCacheParameters
@@ -104,6 +105,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   with HasCircularQueuePtrHelper
   with HasVLSUParameters
   with SdtrigExt
+  with DasicsConst
 {
   val io = IO(new Bundle() {
     // control
@@ -195,6 +197,10 @@ class LoadUnit(implicit p: Parameters) extends XSModule
     val debug_ls         = Output(new DebugLsInfoBundle)
     val lsTopdownInfo    = Output(new LsTopdownInfo)
     val correctMissTrain = Input(Bool())
+
+    // Dasics
+    val dasicsReq = ValidIO(new DasicsReqBundle())
+    val dasicsResp = Flipped(new DasicsRespBundle())
   })
 
   val s1_ready, s2_ready, s3_ready = WireInit(false.B)
@@ -1026,6 +1032,11 @@ class LoadUnit(implicit p: Parameters) extends XSModule
     p"S1: pc ${Hexadecimal(s1_out.uop.pc)}, lId ${Hexadecimal(s1_out.uop.lqIdx.asUInt)}, tlb_miss ${io.tlb.resp.bits.miss}, " +
     p"paddr ${Hexadecimal(s1_out.paddr)}, mmio ${s1_out.mmio}\n")
 
+  io.dasicsReq.valid := s1_fire 
+  io.dasicsReq.bits.addr := s1_vaddr
+  io.dasicsReq.bits.inUntrustedZone := s1_out.uop.dasicsUntrusted
+  io.dasicsReq.bits.operation := DasicsOp.read
+
   // Pipeline
   // --------------------------------------------------------------------------------
   // stage 2
@@ -1061,12 +1072,19 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   // if such exception happen, that inst and its exception info
   // will be force writebacked to rob
   val s2_exception_vec = WireInit(s2_in.uop.exceptionVec)
+  val s2_exception_ffreason = WireInit(s2_in.uop.dasics_inst_info.FaultReason)
   when (!s2_in.delayedLoadError) {
     s2_exception_vec(loadAccessFault) := (s2_in.uop.exceptionVec(loadAccessFault) ||
                                          s2_pmp.ld ||
                                          s2_isvec && s2_pmp.mmio && !s2_prf && !s2_in.tlbMiss ||
                                          (io.dcache.resp.bits.tag_error && GatedValidRegNext(io.csrCtrl.cache_error_enable))
                                          ) && s2_vecActive
+    //Dasics load access fault  
+    when (io.dasicsResp.dasics_fault > s2_in.uop.dasics_inst_info.FaultReason) { // DasicsFaultReason.LoadDasicsFault
+      s2_exception_vec(dasicsUCheckFault) := s2_in.uop.exceptionVec(dasicsUCheckFault) || io.dasicsResp.mode === ModeU
+      //s2_exception_vec(dasicsSCheckFault) := io.in.bits.uop.cf.exceptionVec(dasicsSCheckFault) || io.dasicsResp.mode === ModeS
+      s2_exception_ffreason := io.dasicsResp.dasics_fault
+  }
   }
 
   // soft prefetch will not trigger any exception (but ecc error interrupt may
@@ -1217,6 +1235,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   s2_out.mmio                := s2_mmio
   s2_out.uop.flushPipe       := false.B
   s2_out.uop.exceptionVec    := s2_exception_vec
+  s2_out.uop.dasics_inst_info.FaultReason := s2_exception_ffreason
   s2_out.forwardMask         := s2_fwd_mask
   s2_out.forwardData         := s2_fwd_data
   s2_out.handledByMSHR       := s2_cache_handled

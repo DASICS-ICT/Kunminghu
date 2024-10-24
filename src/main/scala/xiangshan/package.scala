@@ -186,7 +186,7 @@ package object xiangshan {
   }
 
   object ExceptionVec {
-    val ExceptionVecSize = 24
+    val ExceptionVecSize = 26
     def apply() = Vec(ExceptionVecSize, Bool())
     def apply(init: Bool) = VecInit(Seq.fill(ExceptionVecSize)(init))
   }
@@ -258,10 +258,15 @@ package object xiangshan {
     def jal  = "b00".U
     def jalr = "b01".U
     def auipc = "b10".U
+    // def dasicscall_j: UInt = "b100".U   // this would split into a dasicscall_j & a csrw
+    // def dasicscall_jr: UInt = "b101".U  // this would split into a jalr & a csrw
 //    def call = "b11_011".U
 //    def ret  = "b11_100".U
-    def jumpOpisJalr(op: UInt) = op(0)
-    def jumpOpisAuipc(op: UInt) = op(1)
+    def jumpOpisJalr(op: UInt) = op === jalr
+    def jumpOpisAuipc(op: UInt) = op === auipc
+    // def jumpOpIsDasicscall(op: UInt): Bool = (op === dasicscall_j || op === dasicscall_jr)
+    // def jumpOpIsDasicscallJR(op: UInt): Bool = op === dasicscall_jr
+    // def jumpOpIsDasicscallJ(op: UInt): Bool = op === dasicscall_j
   }
 
   object FenceOpType {
@@ -695,6 +700,8 @@ package object xiangshan {
     def IMM_I  = "b0100".U
     def IMM_Z  = "b0101".U
     def INVALID_INSTR = "b0110".U
+    def IMM_DIJ = "b0111".U
+
     def IMM_B6 = "b1000".U
 
     def IMM_OPIVIS = "b1001".U
@@ -716,6 +723,7 @@ package object xiangshan {
         IMM_UJ.litValue        -> "UJ",
         IMM_I.litValue         -> "I",
         IMM_Z.litValue         -> "Z",
+        IMM_DIJ.litValue       -> "DIJ",
         IMM_B6.litValue        -> "B6",
         IMM_OPIVIS.litValue    -> "VIS",
         IMM_OPIVIU.litValue    -> "VIU",
@@ -736,6 +744,7 @@ package object xiangshan {
         IMM_UJ.litValue        -> ImmUnion.J,
         IMM_I.litValue         -> ImmUnion.I,
         IMM_Z.litValue         -> ImmUnion.Z,
+        IMM_DIJ.litValue       -> ImmUnion.DIJ,
         IMM_B6.litValue        -> ImmUnion.B6,
         IMM_OPIVIS.litValue    -> ImmUnion.OPIVIS,
         IMM_OPIVIU.litValue    -> ImmUnion.OPIVIU,
@@ -822,6 +831,9 @@ package object xiangshan {
     def virtualInstr        = 22
     def storeGuestPageFault = 23
 
+    def dasicsUCheckFault      = 24
+    def dasicsSCheckFault      = 25
+
     // Just alias
     def EX_IAM    = instrAddrMisaligned
     def EX_IAF    = instrAccessFault
@@ -843,6 +855,9 @@ package object xiangshan {
     def EX_VI     = virtualInstr
     def EX_SGPF   = storeGuestPageFault
 
+    def EX_DUCF   = dasicsUCheckFault
+    def EX_DSCF   = dasicsSCheckFault
+
     def getAddressMisaligned = Seq(EX_IAM, EX_LAM, EX_SAM)
 
     def getAccessFault = Seq(EX_IAF, EX_LAF, EX_SAF)
@@ -858,6 +873,8 @@ package object xiangshan {
     def getLoadFault = Seq(EX_LAM, EX_LAF, EX_LPF)
 
     def getStoreFault = Seq(EX_SAM, EX_SAF, EX_SPF)
+
+    def getDasicsFault = Seq(EX_DUCF, EX_DSCF)
 
     def priorities = Seq(
       breakPoint, // TODO: different BP has different priority
@@ -875,7 +892,9 @@ package object xiangshan {
       storeGuestPageFault,
       loadGuestPageFault,
       storeAccessFault,
-      loadAccessFault
+      loadAccessFault,
+      dasicsSCheckFault,
+      dasicsUCheckFault
     )
 
     def getHigherExcpThan(excp: Int): Seq[Int] = {
@@ -892,7 +911,13 @@ package object xiangshan {
       instrPageFault,
       instrGuestPageFault,
       virtualInstr,
-      breakPoint
+      breakPoint,
+      dasicsSCheckFault,
+      dasicsUCheckFault
+    )
+    def dasicsSet = Seq(
+      dasicsSCheckFault,
+      dasicsUCheckFault
     )
     def partialSelect(vec: Vec[Bool], select: Seq[Int]): Vec[Bool] = {
       val new_vec = Wire(ExceptionVec())
@@ -906,6 +931,7 @@ package object xiangshan {
       select.diff(unSelect).foreach(i => new_vec(i) := vec(i))
       new_vec
     }
+    def selectDasics(vec:Vec[Bool]): Vec[Bool] = partialSelect(vec, dasicsSet)
     def selectFrontend(vec: Vec[Bool]): Vec[Bool] = partialSelect(vec, frontendSet)
     def selectAll(vec: Vec[Bool]): Vec[Bool] = partialSelect(vec, ExceptionNO.all)
     def selectByFu(vec:Vec[Bool], fuConfig: FuConfig): Vec[Bool] =

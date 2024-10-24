@@ -13,7 +13,9 @@ import xiangshan.backend.fu.NewCSR.CSREnumTypeImplicitCast._
 
 import scala.collection.immutable.SeqMap
 
-trait Unprivileged { self: NewCSR with MachineLevel with SupervisorLevel =>
+trait Unprivileged { self: NewCSR with MachineLevel
+                                  with SupervisorLevel
+                                  =>
 
   val fcsr = Module(new CSRModule("Fcsr", new CSRBundle {
     val NX = WARL(0, wNoFilter)

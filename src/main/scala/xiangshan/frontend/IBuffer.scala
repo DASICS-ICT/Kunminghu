@@ -23,6 +23,9 @@ import xiangshan._
 import utils._
 import utility._
 import xiangshan.ExceptionNO._
+import xiangshan.backend.fu.DasicsFaultReason
+import xiangshan.backend.fu.DasicsRespDataBundle
+import xiangshan.backend.fu.csr.HasCSRConst
 
 class IBufPtr(implicit p: Parameters) extends CircularQueuePtr[IBufPtr](
   p => p(XSCoreParamsKey).IBufSize
@@ -67,6 +70,9 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
   val exceptionFromBackend = Bool()
   val triggered = TriggerAction()
   val isLastInFtqEntry = Bool()
+  val dasicsUntrusted = Bool()
+  val dasicsBrResp = new DasicsRespDataBundle
+  val lastBranch: UInt = UInt(VAddrBits.W)
 
   def fromFetch(fetch: FetchToIBuffer, i: Int): IBufEntry = {
     inst   := fetch.instrs(i)
@@ -84,6 +90,14 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
     exceptionFromBackend := fetch.exceptionFromBackend(i)
     triggered := fetch.triggered(i)
     isLastInFtqEntry := fetch.isLastInFtqEntry(i)
+    dasicsUntrusted := fetch.dasicsUntrusted(i)
+    dasicsBrResp.dasics_fault := DasicsFaultReason.noDasicsFault
+    dasicsBrResp.mode := fetch.dasicsBrResp.mode
+    lastBranch := DontCare
+    if (i == 0) { // only the first instr is a branch target
+      dasicsBrResp.dasics_fault := fetch.dasicsBrResp.dasics_fault
+      lastBranch := fetch.lastBranch
+    
     this
   }
 
@@ -97,6 +111,8 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
     cf.exceptionVec(instrGuestPageFault) := IBufferExceptionType.isGPF(this.exceptionType)
     cf.exceptionVec(instrAccessFault)    := IBufferExceptionType.isAF (this.exceptionType)
     cf.exceptionVec(EX_II)               := IBufferExceptionType.isRVCII(this.exceptionType)
+    cf.exceptionVec(dasicsUCheckFault)      := dasicsBrResp.dasics_fault === DasicsFaultReason.JumpDasicsFault && dasicsBrResp.mode === ModeU
+    // cf.exceptionVec(dasicsSCheckFault)      := dasicsBrResp.dasics_fault === DasicsFaultReason.JumpDasicsFault && dasicsBrResp.mode === ModeS
     cf.exceptionFromBackend := exceptionFromBackend
     cf.trigger := triggered
     cf.pd := pd
@@ -110,6 +126,10 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
     cf.ftqPtr := ftqPtr
     cf.ftqOffset := ftqOffset
     cf.isLastInFtqEntry := isLastInFtqEntry
+    cf.dasics_inst_info.Untrusted := dasicsUntrusted
+    cf.dasics_inst_info.FaultReason := dasicsBrResp.dasics_fault
+    cf.dasics_inst_info.lastBranch.valid := dasicsBrResp.dasics_fault =/= DasicsFaultReason.noDasicsFault
+    cf.dasics_inst_info.lastBranch.bits := lastBranch
     cf
   }
 

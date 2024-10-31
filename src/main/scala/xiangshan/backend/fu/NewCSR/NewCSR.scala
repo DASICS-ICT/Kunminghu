@@ -1390,6 +1390,19 @@ class NewCSR(implicit val p: Parameters) extends Module
     diffHCSRState.vsatp       := vsatp.rdata.asUInt
     diffHCSRState.vsscratch   := vsscratch.rdata.asUInt
 
+    val diffDasicsCSRState = DifftestModule(new DiffDasicsCSRState)
+    diffDasicsCSRState.dasicsMainCfg := dumcfg.rdata.asUInt
+    diffDasicsCSRState.dasicsUMBoundLo := dumboundlo.rdata.asUInt
+    diffDasicsCSRState.dasicsUMBoundHi := dumboundhi.rdata.asUInt
+    diffDasicsCSRState.dasicsLibCfg := dlcfg.rdata.asUInt
+    diffDasicsCSRState.dasicsMainCall := dmaincall.rdata.asUInt
+    diffDasicsCSRState.dasicsReturnPC := dretpc.rdata.asUInt
+    diffDasicsCSRState.dasicsAZoneReturnPC := dretpcfz.rdata.asUInt
+    diffDasicsCSRState.dasicsFReason := dfreason.rdata.asUInt
+    diffDasicsCSRState.dasicsJumpCfg := djcfg.rdata.asUInt
+    for (i <- 0 until NumDasicsMemBounds*2) diffDasicsCSRState.dasicsLibBound(i) := dlbound(i).rdata.asUInt
+    for (i <- 0 until NumDasicsJmpBounds*2) diffDasicsCSRState.dasicsJumpBound(i) := djbound(i).rdata.asUInt
+
     val platformIRPMeipChange = !platformIRP.MEIP &&  RegNext(platformIRP.MEIP) ||
                                  platformIRP.MEIP && !RegNext(platformIRP.MEIP) ||
                                 !fromAIA.meip     &&  RegNext(fromAIA.meip)     ||

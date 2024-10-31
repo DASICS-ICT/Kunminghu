@@ -6,6 +6,7 @@ import org.chipsalliance.cde.config.Parameters
 import utility._
 import xiangshan._
 import xiangshan.backend.fu.NewCSR._
+import xiangshan.backend.fu._
 import xiangshan.backend.fu.util._
 import xiangshan.backend.fu.{FuConfig, FuncUnit, DasicsConst}
 import device._
@@ -216,13 +217,23 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
 
   private val exceptionVec = WireInit(0.U.asTypeOf(ExceptionVec())) // Todo:
 
+  val dasicsCfg = Wire(new DasicsMainCfg())
+  val dasicsIsUntrusted = io.in.bits.dasics_inst_info.Untrusted
+  dasicsCfg.gen(csrMod.io.status.custom.dasics.dmcfg)
+  val hasDasicsUEcallFault = isEcall && privState.isModeHU && dasicsIsUntrusted && !dasicsCfg.closeUEcallFault
+
   exceptionVec(EX_BP    ) := DataHoldBypass(isEbreak, false.B, io.in.fire)
   exceptionVec(EX_MCALL ) := DataHoldBypass(isEcall && privState.isModeM, false.B, io.in.fire)
   exceptionVec(EX_HSCALL) := DataHoldBypass(isEcall && privState.isModeHS, false.B, io.in.fire)
   exceptionVec(EX_VSCALL) := DataHoldBypass(isEcall && privState.isModeVS, false.B, io.in.fire)
-  exceptionVec(EX_UCALL ) := DataHoldBypass(isEcall && privState.isModeHUorVU, false.B, io.in.fire)
+  exceptionVec(EX_UCALL ) := DataHoldBypass(isEcall && (privState.isModeVU || (privState.isModeHU && (!dasicsIsUntrusted || dasicsIsUntrusted && dasicsCfg.closeUEcallFault))), false.B, io.in.fire)
   exceptionVec(EX_II    ) := csrMod.io.out.bits.EX_II
   exceptionVec(EX_VI    ) := csrMod.io.out.bits.EX_VI
+  exceptionVec(dasicsUCheckFault) := DataHoldBypass(hasDasicsUEcallFault, false.B, io.in.fire)
+
+//  val hasDasicsSEcallFault = priviledgeMode === ModeS && io.in.valid && isEcall && isUntrusted && !dasicsCfg.closeSEcallFault
+//  csrExceptionVec(dasicsSCheckFault) := cfIn.exceptionVec(dasicsSCheckFault) || hasDasicsSEcallFault
+
 
   val isXRet = valid && func === CSROpType.jmp && !isEcall && !isEbreak
 
@@ -270,6 +281,11 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   io.out.bits.ctrl.exceptionVec.get := exceptionVec
   io.out.bits.ctrl.flushPipe.get := flushPipe
   io.out.bits.res.data := csrMod.io.out.bits.rData
+
+  io.out.bits.dasics_inst_info := io.in.bits.dasics_inst_info
+  io.out.bits.dasics_inst_info.FaultReason := Mux(hasDasicsUEcallFault && DasicsFaultReason.EcallDasicsFault > io.in.bits.dasics_inst_info.FaultReason,
+                                                  DasicsFaultReason.EcallDasicsFault,
+                                                  io.in.bits.dasics_inst_info.FaultReason)
 
   /** initialize NewCSR's io_out_ready from wrapper's io */
   csrMod.io.out.ready := io.out.ready

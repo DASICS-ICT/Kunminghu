@@ -202,19 +202,5 @@ object CSRBundles {
     // Rename
     val fusion_enable = Output(Bool())
     val wfi_enable = Output(Bool())
-    val dasics = new CSRDasicsState()
-  }
-  class CSRDasicsState(implicit p: Parameters) extends Bundle with DasicsConst {
-    val dmcfg = Output(UInt(64.W))
-    val dumboundlo = Output(UInt(64.W))
-    val dumboundhi = Output(UInt(64.W))
-    val dlcfg = Output(UInt(64.W))
-    val dlbound = Output(Vec(NumDasicsMemBounds*2, UInt(64.W)))
-    val dmaincall = Output(UInt(64.W))
-    val dretpc = Output(UInt(64.W))
-    val dretpcfz = Output(UInt(64.W))
-    val dfreason = Output(UInt(64.W))
-    val djcfg = Output(UInt(64.W))
-    val djbound = Output(Vec(NumDasicsJmpBounds*2, UInt(64.W)))
   }
 }

@@ -385,7 +385,7 @@ class StoreUnit(implicit p: Parameters) extends XSModule
 
   io.dasicsReq.valid := s1_fire 
   io.dasicsReq.bits.addr := s1_in.vaddr
-  io.dasicsReq.bits.inUntrustedZone := s1_out.uop.dasicsUntrusted
+  io.dasicsReq.bits.inUntrustedZone := s1_out.uop.dasics_inst_info.Untrusted
   io.dasicsReq.bits.operation := DasicsOp.write
 
   // Pipeline

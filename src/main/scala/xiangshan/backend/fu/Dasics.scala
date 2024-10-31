@@ -5,7 +5,8 @@ package xiangshan.backend.fu
 import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
-import utils._
+import utility._
+import utility.MaskedRegMap.WritableMask
 import xiangshan._
 import xiangshan.backend.fu.NewCSR.CSRDefines.PrivMode
 
@@ -125,11 +126,8 @@ class DasicsEntry(implicit p: Parameters) extends XSBundle with DasicsConst {
   }
 
   // assign values (bounds parameter are XLEN-length)
-  def gen(cfg: UInt, boundLo: UInt, boundHi: UInt): Unit = {
-    this.cfg.v := cfg(3)
-    this.cfg.u := cfg(2)
-    this.cfg.r := cfg(1)
-    this.cfg.w := cfg(0)
+  def gen(cfg: DasicsMemConfig, boundLo: UInt, boundHi: UInt): Unit = {
+    this.cfg := cfg
     this.boundLo := Cat(boundLo(VAddrBits - 1, DasicsGrainBit),0.U(DasicsGrainBit.W))
     this.boundHi := Cat(boundHi(VAddrBits - 1, DasicsGrainBit),0.U(DasicsGrainBit.W))
   }
@@ -151,8 +149,8 @@ class DasicsJumpEntry(implicit p: Parameters) extends XSBundle with DasicsConst 
   }
 
   // assign values (bounds parameter are XLEN-length)
-  def gen(cfg: UInt, boundLo: UInt, boundHi: UInt): Unit = {
-    this.cfg.v := cfg(0).asBool
+  def gen(cfg: DasicsJumpConfig, boundLo: UInt, boundHi: UInt): Unit = {
+    this.cfg := cfg
     this.boundLo := Cat(boundLo(VAddrBits - 1, DasicsGrainBit),0.U(DasicsGrainBit.W))
     this.boundHi := Cat(boundHi(VAddrBits - 1, DasicsGrainBit),0.U(DasicsGrainBit.W))
   }
@@ -173,86 +171,86 @@ trait DasicsMethod extends DasicsConst { this: HasXSParameter =>
     (cfgs, bounds)
   }
   
-//  /* Dasics Memory Bound Register Mapping Generate */
-//  def DasicsGenMemMapping(
-//    mem_init: () => (Vec[UInt], Vec[UInt]),
-//    memNum: Int = NumDasicsMemBounds,
-//    memCfgBase: Int, memBoundBase: Int,
-//    memEntries: Vec[DasicsEntry],
-//  ): Map[Int, (UInt, UInt, UInt => UInt, UInt, UInt => UInt)] = {
-//    val DasicsMemCfgPerCSR = XLEN / DasicsMemConfig.getWidth
-//    def DasicsMemCfgIndex(i: Int) = i / DasicsMemCfgPerCSR
-//    // init_value: (cfgs, bounds)
-//    val mem_init_value = mem_init()
-//
-//    // DasicsConfigs merged into CSR
-//    val mem_cfg_merged = RegInit(mem_init_value._1)
-//    val mem_cfgs = WireInit(mem_cfg_merged).asTypeOf(Vec(NumDasicsMemBounds, new DasicsMemConfig))
-//    val mem_bounds = RegInit(mem_init_value._2)
-//
-//    // Wire entries to the registers
-//    for (i <- memEntries.indices) {
-//      memEntries(i).gen(mem_cfgs(i), boundLo = mem_bounds(i * 2), boundHi = mem_bounds(i * 2 + 1))
-//    }
-//
-//    val mem_cfg_mapping = Map(
-//      (0 until memNum by DasicsMemCfgPerCSR).map(i =>
-//        MaskedRegMap(addr = memCfgBase + DasicsMemCfgIndex(i), reg = mem_cfg_merged(i / DasicsMemCfgPerCSR))
-//      ) : _*
-//    )
-//
-//    val mem_bound_mapping = Map(
-//      (0 until memNum * 2).map(i => MaskedRegMap(
-//        addr = memBoundBase + i, reg = mem_bounds(i),
-//        wmask = DasicsEntry.boundRegMask, rmask = DasicsEntry.boundRegMask
-//      )) : _*
-//    )
-//
-//    mem_cfg_mapping ++ mem_bound_mapping
-//  }
-//
-//  /* Dasics Jump Bound Register Mapping Generate */
-//  def DasicsGenJumpMapping(
-//                            jump_init: () => (Vec[UInt], Vec[UInt]),
-//                            jumpNum: Int = NumDasicsJmpBounds,
-//                            jumpCfgBase: Int, jumpBoundBase: Int,
-//                            jumpEntries: Vec[DasicsJumpEntry]
-//  ): Map[Int, (UInt, UInt, UInt => UInt, UInt, UInt => UInt)] = {
-//    val DasicsJumpCfgPerCSR = 4
-//    def DasicsJumpCfgIndex(i: Int) = i / DasicsJumpCfgPerCSR
-//    // init_value: (cfgs, bounds)
-//    val jump_init_value = jump_init()
-//
-//    class DasicsJumpConfigExt extends DasicsConfig{
-//      val reserve = UInt((16 - DasicsJumpConfig.getWidth).W)
-//      val data = new DasicsJumpConfig
-//    }
-//
-//    // DasicsConfigs merged into CSR
-//    val jump_cfg_merged = RegInit(jump_init_value._1)
-//    val jump_cfgs = WireInit(jump_cfg_merged).asTypeOf(Vec(NumDasicsJmpBounds, new DasicsJumpConfigExt))
-//    val jump_bounds = RegInit(jump_init_value._2)
-//
-//    // Wire entries to the registers
-//    for (i <- jumpEntries.indices) {
-//      jumpEntries(i).gen(jump_cfgs(i).data, boundLo = jump_bounds(i * 2), boundHi = jump_bounds(i * 2 + 1))
-//    }
-//
-//    val jump_cfg_mapping = Map(
-//      (0 until jumpNum by DasicsJumpCfgPerCSR).map(i =>
-//        MaskedRegMap(addr = jumpCfgBase + DasicsJumpCfgIndex(i), reg = jump_cfg_merged(i / DasicsJumpCfgPerCSR))
-//      ) : _*
-//    )
-//
-//    val jump_bound_mapping = Map(
-//      (0 until jumpNum * 2).map(i => MaskedRegMap(
-//        addr = jumpBoundBase + i, reg = jump_bounds(i),
-//        wmask = DasicsEntry.boundRegMask, rmask = DasicsEntry.boundRegMask
-//      )) : _*
-//    )
-//
-//    jump_cfg_mapping ++ jump_bound_mapping
-//  }
+  /* Dasics Memory Bound Register Mapping Generate */
+  def DasicsGenMemMapping(
+    mem_init: () => (Vec[UInt], Vec[UInt]),
+    memNum: Int = NumDasicsMemBounds,
+    memCfgBase: Int, memBoundBase: Int,
+    memEntries: Vec[DasicsEntry],
+  ): Map[Int, (UInt, UInt, UInt => UInt, UInt, UInt => UInt)] = {
+    val DasicsMemCfgPerCSR = XLEN / DasicsMemConfig.getWidth
+    def DasicsMemCfgIndex(i: Int) = i / DasicsMemCfgPerCSR
+    // init_value: (cfgs, bounds)
+    val mem_init_value = mem_init()
+
+    // DasicsConfigs merged into CSR
+    val mem_cfg_merged = RegInit(mem_init_value._1)
+    val mem_cfgs = WireInit(mem_cfg_merged).asTypeOf(Vec(NumDasicsMemBounds, new DasicsMemConfig))
+    val mem_bounds = RegInit(mem_init_value._2)
+
+    // Wire entries to the registers
+    for (i <- memEntries.indices) {
+      memEntries(i).gen(mem_cfgs(i), boundLo = mem_bounds(i * 2), boundHi = mem_bounds(i * 2 + 1))
+    }
+
+    val mem_cfg_mapping = Map(
+      (0 until memNum by DasicsMemCfgPerCSR).map(i =>
+        MaskedRegMap(addr = memCfgBase + DasicsMemCfgIndex(i), reg = mem_cfg_merged(i / DasicsMemCfgPerCSR))
+      ) : _*
+    )
+
+    val mem_bound_mapping = Map(
+      (0 until memNum * 2).map(i => MaskedRegMap(
+        addr = memBoundBase + i, reg = mem_bounds(i),
+        wmask = DasicsEntry.boundRegMask, rmask = DasicsEntry.boundRegMask
+      )) : _*
+    )
+
+    mem_cfg_mapping ++ mem_bound_mapping
+  }
+
+  /* Dasics Jump Bound Register Mapping Generate */
+  def DasicsGenJumpMapping(
+                            jump_init: () => (Vec[UInt], Vec[UInt]),
+                            jumpNum: Int = NumDasicsJmpBounds,
+                            jumpCfgBase: Int, jumpBoundBase: Int,
+                            jumpEntries: Vec[DasicsJumpEntry]
+  ): Map[Int, (UInt, UInt, UInt => UInt, UInt, UInt => UInt)] = {
+    val DasicsJumpCfgPerCSR = 4
+    def DasicsJumpCfgIndex(i: Int) = i / DasicsJumpCfgPerCSR
+    // init_value: (cfgs, bounds)
+    val jump_init_value = jump_init()
+
+    class DasicsJumpConfigExt extends DasicsConfig{
+      val reserve = UInt((16 - DasicsJumpConfig.getWidth).W)
+      val data = new DasicsJumpConfig
+    }
+
+    // DasicsConfigs merged into CSR
+    val jump_cfg_merged = RegInit(jump_init_value._1)
+    val jump_cfgs = WireInit(jump_cfg_merged).asTypeOf(Vec(NumDasicsJmpBounds, new DasicsJumpConfigExt))
+    val jump_bounds = RegInit(jump_init_value._2)
+
+    // Wire entries to the registers
+    for (i <- jumpEntries.indices) {
+      jumpEntries(i).gen(jump_cfgs(i).data, boundLo = jump_bounds(i * 2), boundHi = jump_bounds(i * 2 + 1))
+    }
+
+    val jump_cfg_mapping = Map(
+      (0 until jumpNum by DasicsJumpCfgPerCSR).map(i =>
+        MaskedRegMap(addr = jumpCfgBase + DasicsJumpCfgIndex(i), reg = jump_cfg_merged(i / DasicsJumpCfgPerCSR))
+      ) : _*
+    )
+
+    val jump_bound_mapping = Map(
+      (0 until jumpNum * 2).map(i => MaskedRegMap(
+        addr = jumpBoundBase + i, reg = jump_bounds(i),
+        wmask = DasicsEntry.boundRegMask, rmask = DasicsEntry.boundRegMask
+      )) : _*
+    )
+
+    jump_cfg_mapping ++ jump_bound_mapping
+  }
 
 
   // Singleton companion object for DasicsEntry, with implicit parameters set
@@ -260,11 +258,9 @@ trait DasicsMethod extends DasicsConst { this: HasXSParameter =>
 }
 
 class DasicsMemConverterIO(implicit p: Parameters) extends XSBundle with DasicsConst {
-//  val distribute_csr: DistributedCSRIO = Flipped(new DistributedCSRIO())
-  val dasicsinfo = Flipped(new dasicsCSRIO)
+  val distribute_csr: DistributedCSRIO = Flipped(new DistributedCSRIO())
   val entries: Vec[DasicsEntry] = Output(Vec(NumDasicsMemBounds, new DasicsEntry))
   val maincfg = Output(new DasicsMainCfg)
-  val mode = Output(UInt(2.W))
 }
 
 class DasicsReqBundle(implicit p: Parameters) extends XSBundle with DasicsConst {
@@ -315,37 +311,26 @@ class DasicsMemCheckerIO(implicit p: Parameters) extends XSBundle with DasicsCon
 class DasicsMemConverter(implicit p: Parameters) extends XSModule with DasicsMethod {
   val io = IO(new DasicsMemConverterIO())
 
-//  val w = io.distribute_csr.w
+  val w = io.distribute_csr.w
 
   private val dasics_entries = Wire(Vec(NumDasicsMemBounds, new DasicsEntry))
-  private val dasics_main_cfg = Wire(new DasicsMainCfg)
-  private val dasics_mode = Wire(UInt(2.W))
-//  val mapping = DasicsGenMemMapping(mem_init = DasicsMemInit, memCfgBase = DasicsLibCfgBase, memBoundBase = DasicsLibBoundBase, memEntries = dasics)
-//
-//  private val dasics_main_cfg = RegInit(0.U(XLEN.W))
-//  private val mainCfg = Wire(new DasicsMainCfg())
-//  mainCfg.gen(dasics_main_cfg)
-//
-//  val dasics_config_mapping = Map(
-////    MaskedRegMap(DasicsSMainCfg, dasics_main_cfg, "h3ff".U(XLEN.W)),
-//    MaskedRegMap(DasicsUMainCfg, dasics_main_cfg, "h3e".U(XLEN.W))
-//  )
-//
-//  val rdata: UInt = Wire(UInt(XLEN.W))
-//  MaskedRegMap.generate(mapping ++ dasics_config_mapping, w.bits.addr, rdata, w.valid, w.bits.data)
-//
-  for (i <- 0 until NumDasicsMemBounds) {
-    dasics_entries(i).gen(io.dasicsinfo.dlcfg(i+3,i),io.dasicsinfo.dlbound(i),io.dasicsinfo.dlbound(i+1))
-  }
-  dasics_main_cfg.gen(io.dasicsinfo.dmcfg)
+  val mapping = DasicsGenMemMapping(mem_init = DasicsMemInit, memCfgBase = DasicsLibCfgBase, memBoundBase = DasicsLibBoundBase, memEntries = dasics_entries)
 
-  // TODO: can we convert this directly?
-  dasics_mode(1) := io.dasicsinfo.mode.PRVM === PrivMode.M
-  dasics_mode(0) := io.dasicsinfo.mode.PRVM === PrivMode.S
+  private val dasics_main_cfg = RegInit(0.U(XLEN.W))
+  private val mainCfg = Wire(new DasicsMainCfg())
+  mainCfg.gen(dasics_main_cfg)
+
+  val dasics_config_mapping = Map(
+//    MaskedRegMap(DasicsSMainCfg, dasics_main_cfg, "h3ff".U(XLEN.W)),
+    MaskedRegMap(DasicsUMainCfg, dasics_main_cfg, "h3e".U(XLEN.W))
+  )
+
+  val rdata: UInt = Wire(UInt(XLEN.W))
+  MaskedRegMap.generate(mapping ++ dasics_config_mapping, w.bits.addr, rdata, w.valid, w.bits.data)
+
 
   io.entries   := dasics_entries
   io.maincfg   := dasics_main_cfg
-  io.mode      := dasics_mode
  }
 
 trait DasicsCheckerMethod extends DasicsConst{
@@ -418,60 +403,60 @@ class DasicsBranchChecker(implicit p: Parameters) extends XSModule
   with DasicsMethod 
   with DasicsCheckerMethod
   {
-  
-  val io: DasicsBranchIO = IO(new DasicsBranchIO())
 
-//  val w = io.distribute_csr.w
+    val io: DasicsBranchIO = IO(new DasicsBranchIO())
 
-  private val dasics = Wire(Vec(NumDasicsJmpBounds, new DasicsJumpEntry))
-//  val mapping = DasicsGenJumpMapping(jump_init = DasicsJumpInit, jumpCfgBase = DasicsJmpCfgBase, jumpBoundBase = DasicsJmpBoundBase, jumpEntries = dasics)
+    val w = io.distribute_csr.w
 
-  private val dasics_main_call = io.dasicsinfo.dmaincall
-  private val dasics_return_pc = io.dasicsinfo.dretpc
-  private val dasics_azone_return_pc = io.dasicsinfo.dretpcfz
-  private val dasics_main_cfg = io.dasicsinfo.dmcfg
-//  private val dasics_smain_bound_hi = RegInit(0.U(XLEN.W))
-//  private val dasics_smain_bound_lo = RegInit(0.U(XLEN.W))
-  private val dasics_umain_bound_hi = io.dasicsinfo.dumboundhi
-  private val dasics_umain_bound_lo = io.dasicsinfo.dumboundlo
+    private val dasics_entries = Wire(Vec(NumDasicsJmpBounds, new DasicsJumpEntry))
+    val mapping = DasicsGenJumpMapping(jump_init = DasicsJumpInit, jumpCfgBase = DasicsJmpCfgBase, jumpBoundBase = DasicsJmpBoundBase, jumpEntries = dasics_entries)
 
-//  val control_flow_mapping = Map(
-//    MaskedRegMap(DasicsMainCall, dasics_main_call),
-//    MaskedRegMap(DasicsReturnPc, dasics_return_pc),
-//    MaskedRegMap(DasicsActiveZoneReturnPc,dasics_azone_return_pc),
-////    MaskedRegMap(DasicsSMainCfg, dasics_main_cfg, "h3ff".U(XLEN.W)),
-////    MaskedRegMap(DasicsSMainBoundLo, dasics_smain_bound_lo),
-////    MaskedRegMap(DasicsSMainBoundHi, dasics_smain_bound_hi),
-//    MaskedRegMap(DasicsUMainCfg, dasics_main_cfg, "h3e".U(XLEN.W)),
-//    MaskedRegMap(DasicsUMainBoundLo, dasics_umain_bound_lo),
-//    MaskedRegMap(DasicsUMainBoundHi, dasics_umain_bound_hi)
-//  )
-//
-//  val rdata: UInt = Wire(UInt(XLEN.W))
-//  MaskedRegMap.generate(mapping ++ control_flow_mapping, w.bits.addr, rdata, w.valid, w.bits.data)
+    private val dasics_main_call = RegInit(0.U(XLEN.W))
+    private val dasics_return_pc = RegInit(0.U(XLEN.W))
+    private val dasics_azone_return_pc = RegInit(0.U(XLEN.W))
+    private val dasics_main_cfg = RegInit(0.U(XLEN.W))
+//    private val dasics_smain_bound_hi = RegInit(0.U(XLEN.W))
+//    private val dasics_smain_bound_lo = RegInit(0.U(XLEN.W))
+    private val dasics_umain_bound_hi = RegInit(0.U(XLEN.W))
+    private val dasics_umain_bound_lo = RegInit(0.U(XLEN.W))
 
-  private val mainCfg = Wire(new DasicsMainCfg())
-  mainCfg.gen(dasics_main_cfg)
+    val control_flow_mapping = Map(
+      MaskedRegMap(DasicsMainCall, dasics_main_call),
+      MaskedRegMap(DasicsReturnPc, dasics_return_pc),
+      MaskedRegMap(DasicsActiveZoneReturnPc,dasics_azone_return_pc),
+//      MaskedRegMap(DasicsSMainCfg, dasics_main_cfg, "h3ff".U(XLEN.W)),
+//      MaskedRegMap(DasicsSMainBoundLo, dasics_smain_bound_lo),
+//      MaskedRegMap(DasicsSMainBoundHi, dasics_smain_bound_hi),
+      MaskedRegMap(DasicsUMainCfg, dasics_main_cfg, "h3e".U(XLEN.W)),
+      MaskedRegMap(DasicsUMainBoundLo, dasics_umain_bound_lo),
+      MaskedRegMap(DasicsUMainBoundHi, dasics_umain_bound_hi)
+    )
+
+    val rdata: UInt = Wire(UInt(XLEN.W))
+    MaskedRegMap.generate(mapping ++ control_flow_mapping, w.bits.addr, rdata, w.valid, w.bits.data)
+
+    private val mainCfg = Wire(new DasicsMainCfg())
+    mainCfg.gen(dasics_main_cfg)
     private val boundLo = dasics_umain_bound_lo
     private val boundHi = dasics_umain_bound_hi
-//  private val boundLo = Mux(io.mode === ModeS, dasics_smain_bound_lo, dasics_umain_bound_lo)
-//  private val boundHi = Mux(io.mode === ModeS, dasics_smain_bound_hi, dasics_umain_bound_hi)
+//    private val boundLo = Mux(io.mode === ModeS, dasics_smain_bound_lo, dasics_umain_bound_lo)
+//    private val boundHi = Mux(io.mode === ModeS, dasics_smain_bound_hi, dasics_umain_bound_hi)
 
-  private val branchUntrusted = ((io.mode === ModeU && mainCfg.uEnable && !mainCfg.closeUJumpFault) /*||
-                                 (io.mode === ModeS && mainCfg.sEnable && !mainCfg.closeSJumpFault)*/) &&
-                                !dasics_jump_in_bound(
-                                addr = io.lastBranch, boundHi = boundHi(VAddrBits - 1, 0), boundLo = boundLo(VAddrBits - 1, 0)
-                                )
-  private val targetOutOfActive = dasics_jump_check(io.target, dasics)
-  private val illegalBranch = io.valid && branchUntrusted && targetOutOfActive &&
-    (io.target =/= dasics_return_pc) && (io.target =/= dasics_main_call) && (io.target =/= dasics_azone_return_pc)
+    private val branchUntrusted = ((io.mode === ModeU && mainCfg.uEnable && !mainCfg.closeUJumpFault)
+      /*|| (io.mode === ModeS && mainCfg.sEnable && !mainCfg.closeSJumpFault)*/) &&
+      !dasics_jump_in_bound(
+        addr = io.lastBranch, boundHi = boundHi(VAddrBits - 1, 0), boundLo = boundLo(VAddrBits - 1, 0)
+      )
+    private val targetOutOfActive = dasics_jump_check(io.target, dasics_entries)
+    private val illegalBranch = io.valid && branchUntrusted && targetOutOfActive &&
+      (io.target =/= dasics_return_pc) && (io.target =/= dasics_main_call) && (io.target =/= dasics_azone_return_pc)
 
-  io.resp.dasics_fault := Mux(
-    illegalBranch,
-    DasicsFaultReason.JumpDasicsFault,
-    DasicsFaultReason.noDasicsFault
-  )
-  io.resp.mode := io.mode
+    io.resp.dasics_fault := Mux(
+      illegalBranch,
+      DasicsFaultReason.JumpDasicsFault,
+      DasicsFaultReason.noDasicsFault
+    )
+    io.resp.mode := io.mode
 }
 class DasicsMainCfg(implicit p: Parameters) extends XSBundle {
 //  val closeSJumpFault  = Bool()
@@ -569,8 +554,7 @@ class DasicsMainBound(implicit p: Parameters) extends XSBundle with DasicsConst 
 }
 
 class DasicsBranchIO(implicit p: Parameters) extends XSBundle with DasicsConst {
-//  val distribute_csr: DistributedCSRIO = Flipped(new DistributedCSRIO())
-  val dasicsinfo = Input(new dasicsCSRIO)
+  val distribute_csr: DistributedCSRIO = Flipped(new DistributedCSRIO())
   val mode: UInt = Input(UInt(2.W))
   val valid: Bool = Input(Bool())
   val lastBranch: UInt = Input(UInt(VAddrBits.W))
@@ -579,8 +563,7 @@ class DasicsBranchIO(implicit p: Parameters) extends XSBundle with DasicsConst {
 }
 
 class DasicsTaggerIO(implicit p: Parameters) extends XSBundle {
-//  val distribute_csr: DistributedCSRIO = Flipped(new DistributedCSRIO())
-  val dasicsinfo = Input(new dasicsCSRIO)
+  val distribute_csr: DistributedCSRIO = Flipped(new DistributedCSRIO())
   val mode: UInt = Input(UInt(2.W))
   val addr: UInt = Input(UInt(VAddrBits.W))
   // TODO: change FetchWidth * 2 to PredictWidth, by accounting for non-C extension
@@ -591,36 +574,36 @@ class DasicsTaggerIO(implicit p: Parameters) extends XSBundle {
 class DasicsTagger(implicit p: Parameters) extends XSModule with DasicsConst {
   val io: DasicsTaggerIO = IO(new DasicsTaggerIO())
 
-  private val dasics_main_cfg = io.dasicsinfo.dmcfg
+  private val dasics_main_cfg = RegInit(UInt(XLEN.W), 0.U)
 //  private val dasics_smain_bound_hi = RegInit(UInt(XLEN.W), 0.U)
 //  private val dasics_smain_bound_lo = RegInit(UInt(XLEN.W), 0.U)
-  private val dasics_umain_bound_hi = io.dasicsinfo.dumboundhi
-  private val dasics_umain_bound_lo = io.dasicsinfo.dumboundlo
+  private val dasics_umain_bound_hi = RegInit(UInt(XLEN.W), 0.U)
+  private val dasics_umain_bound_lo = RegInit(UInt(XLEN.W), 0.U)
 
   private val mainCfg = Wire(new DasicsMainCfg())
   mainCfg.gen(dasics_main_cfg)
   private val mainBound = Wire(new DasicsMainBound())
-  private val boundLo = dasics_umain_bound_lo
-  private val boundHi = dasics_umain_bound_hi
 //  private val boundLo = Mux(io.mode === ModeS,dasics_smain_bound_lo,dasics_umain_bound_lo)
 //  private val boundHi = Mux(io.mode === ModeS,dasics_smain_bound_hi,dasics_umain_bound_hi)
+  private val boundLo = dasics_umain_bound_lo
+  private val boundHi = dasics_umain_bound_hi
   mainBound.gen(boundLo, boundHi)
   private val cmpTags = mainBound.getPcTags(io.addr)
   io.notTrusted := Mux(
-    io.mode === ModeU && mainCfg.uEnable /* || io.mode === ModeS && mainCfg.sEnable*/,
+    io.mode === ModeU && mainCfg.uEnable/* || io.mode === ModeS && mainCfg.sEnable*/,
     cmpTags,
     VecInit(Seq.fill(FetchWidth * 2)(false.B))
   )
 
-//  val w = io.distribute_csr.w
-//  val mapping: Map[Int, (UInt, UInt, UInt => UInt, UInt, UInt => UInt)] = Map(
-////    MaskedRegMap(DasicsSMainCfg, dasics_main_cfg, "h3ff".U(XLEN.W)),
-////    MaskedRegMap(DasicsSMainBoundLo, dasics_smain_bound_lo),
-////    MaskedRegMap(DasicsSMainBoundHi, dasics_smain_bound_hi),
-//    MaskedRegMap(DasicsUMainCfg, dasics_main_cfg, "h3e".U(XLEN.W)),
-//    MaskedRegMap(DasicsUMainBoundLo, dasics_umain_bound_lo),
-//    MaskedRegMap(DasicsUMainBoundHi, dasics_umain_bound_hi)
-//  )
-//  val rdata: UInt = Wire(UInt(XLEN.W))
-//  MaskedRegMap.generate(mapping, w.bits.addr, rdata, w.valid, w.bits.data)
+  val w = io.distribute_csr.w
+  val mapping: Map[Int, (UInt, UInt, UInt => UInt, UInt, UInt => UInt)] = Map(
+//    MaskedRegMap(DasicsSMainCfg, dasics_main_cfg, "h3ff".U(XLEN.W)),
+//    MaskedRegMap(DasicsSMainBoundLo, dasics_smain_bound_lo),
+//    MaskedRegMap(DasicsSMainBoundHi, dasics_smain_bound_hi),
+    MaskedRegMap(DasicsUMainCfg, dasics_main_cfg, "h3e".U(XLEN.W)),
+    MaskedRegMap(DasicsUMainBoundLo, dasics_umain_bound_lo),
+    MaskedRegMap(DasicsUMainBoundHi, dasics_umain_bound_hi)
+  )
+  val rdata: UInt = Wire(UInt(XLEN.W))
+  MaskedRegMap.generate(mapping, w.bits.addr, rdata, w.valid, w.bits.data)
 }

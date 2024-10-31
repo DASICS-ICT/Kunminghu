@@ -219,7 +219,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
 
   val dasicsCfg = Wire(new DasicsMainCfg())
   val dasicsIsUntrusted = io.in.bits.dasics_inst_info.Untrusted
-  dasicsCfg.gen(csrMod.io.status.custom.dasics.dmcfg)
+  dasicsCfg.gen(csrMod.io.status.dmcfg)
   val hasDasicsUEcallFault = isEcall && privState.isModeHU && dasicsIsUntrusted && !dasicsCfg.closeUEcallFault
 
   exceptionVec(EX_BP    ) := DataHoldBypass(isEbreak, false.B, io.in.fire)
@@ -369,19 +369,8 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       custom.mem_trigger      := csrMod.io.status.memTrigger
       // virtual mode
       custom.virtMode := csrMod.io.status.privState.V.asBool
-      // dasics
-      custom.dasics.mode := csrMod.io.status.privState
-      custom.dasics.dmcfg := csrMod.io.status.custom.dasics.dmcfg
-      custom.dasics.dumboundhi := csrMod.io.status.custom.dasics.dumboundhi
-      custom.dasics.dumboundlo := csrMod.io.status.custom.dasics.dumboundlo
-      custom.dasics.dlcfg := csrMod.io.status.custom.dasics.dlcfg
-      custom.dasics.djcfg := csrMod.io.status.custom.dasics.djcfg
-      custom.dasics.dmaincall := csrMod.io.status.custom.dasics.dmaincall
-      custom.dasics.dretpc := csrMod.io.status.custom.dasics.dretpc
-      custom.dasics.dretpcfz := csrMod.io.status.custom.dasics.dretpcfz
-      custom.dasics.dfreason := csrMod.io.status.custom.dasics.dfreason
-      for (i <- 0 until NumDasicsMemBounds*2) custom.dasics.dlbound(i) := csrMod.io.status.custom.dasics.dlbound(i)
-      for (i <- 0 until NumDasicsJmpBounds*2) custom.dasics.djbound(i) := csrMod.io.status.custom.dasics.djbound(i)
+      // privilege mode (dasics memchecker needed)
+      custom.privMode := csrMod.io.status.privState.PRVM.asUInt
   }
 
   csrOut.instrAddrTransType := csrMod.io.status.instrAddrTransType

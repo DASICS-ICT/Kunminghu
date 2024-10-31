@@ -615,21 +615,7 @@ class CustomCSRCtrlIO(implicit p: Parameters) extends XSBundle {
   val mem_trigger = new MemTdataDistributeIO()
   // Virtualization Mode
   val virtMode = Output(Bool())
-  val dasics = new dasicsCSRIO()
-}
-class dasicsCSRIO(implicit p: Parameters) extends XSBundle with DasicsConst{
-  val mode = Output(new PrivState)
-  val dmcfg = Output(UInt(64.W))
-  val dumboundlo = Output(UInt(64.W))
-  val dumboundhi = Output(UInt(64.W))
-  val dlcfg = Output(UInt(64.W))
-  val dlbound = Output(Vec(NumDasicsMemBounds*2, UInt(64.W)))
-  val dmaincall = Output(UInt(64.W))
-  val dretpc = Output(UInt(64.W))
-  val dretpcfz = Output(UInt(64.W))
-  val dfreason = Output(UInt(64.W))
-  val djcfg = Output(UInt(64.W))
-  val djbound = Output(Vec(NumDasicsJmpBounds*2, UInt(64.W)))
+  val privMode = Output(UInt(2.W))
 }
 
 class DistributedCSRIO(implicit p: Parameters) extends XSBundle {

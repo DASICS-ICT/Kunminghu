@@ -9,7 +9,7 @@ import top.{ArgParser, Generator}
 import utility.{DataHoldBypass, DelayN, GatedValidRegNext, HPerfMonitor, PerfEvent, RegNextWithEnable, SignExt, ZeroExt}
 import utils.OptionWrapper
 import xiangshan.backend.fu._
-import xiangshan.backend.fu.NewCSR.CSRBundles.{CSRCustomState, CSRDasicsState, PrivState, RobCommitCSR}
+import xiangshan.backend.fu.NewCSR.CSRBundles.{CSRCustomState, PrivState, RobCommitCSR}
 import xiangshan.backend.fu.NewCSR.CSRDefines._
 import xiangshan.backend.fu.NewCSR.CSREnumTypeImplicitCast._
 import xiangshan.backend.fu.NewCSR.CSREvents.{CSREvents, DretEventSinkBundle, EventUpdatePrivStateOutput, MNretEventSinkBundle, MretEventSinkBundle, SretEventSinkBundle, TargetPCBundle, TrapEntryDEventSinkBundle, TrapEntryEventInput, TrapEntryHSEventSinkBundle, TrapEntryMEventSinkBundle, TrapEntryMNEventSinkBundle, TrapEntryVSEventSinkBundle}
@@ -189,6 +189,8 @@ class NewCSR(implicit val p: Parameters) extends Module
       val instrAddrTransType = new AddrTransType
       // custom
       val custom = new CSRCustomState
+      // dasics
+      val dmcfg = UInt(XLEN.W)
     })
     // tlb
     val tlb = Output(new Bundle {
@@ -1143,6 +1145,8 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   io.status.custom.fusion_enable           := srnctl.regOut.FUSION_ENABLE.asBool
   io.status.custom.wfi_enable              := srnctl.regOut.WFI_ENABLE.asBool && (!io.status.singleStepFlag) && !debugMode
+// dasics
+  io.status.dmcfg := dumcfg.rdata
 
   io.status.instrAddrTransType.bare := privState.isModeM ||
     (!privState.isVirtual && satp.regOut.MODE === SatpMode.Bare) ||
@@ -1154,19 +1158,6 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.status.instrAddrTransType.sv39x4 := privState.isVirtual && vsatp.regOut.MODE === SatpMode.Bare && hgatp.regOut.MODE === HgatpMode.Sv39x4
   io.status.instrAddrTransType.sv48x4 := privState.isVirtual && vsatp.regOut.MODE === SatpMode.Bare && hgatp.regOut.MODE === HgatpMode.Sv48x4
   assert(PopCount(io.status.instrAddrTransType.asUInt) === 1.U, "Exactly one inst trans type should be asserted")
-
-  // io dasics connection
-  io.status.custom.dasics.dmcfg := dumcfg.regOut
-  io.status.custom.dasics.dumboundlo := dumboundlo.regOut
-  io.status.custom.dasics.dumboundhi := dumboundhi.regOut
-  io.status.custom.dasics.dlcfg := dlcfg.regOut
-  io.status.custom.dasics.djcfg := djcfg.regOut
-  io.status.custom.dasics.dmaincall := dmaincall.regOut
-  io.status.custom.dasics.dretpc := dretpc.regOut
-  io.status.custom.dasics.dretpcfz := dretpcfz.regOut
-  io.status.custom.dasics.dfreason := dfreason.regOut
-  for (i <- 0 until NumDasicsMemBounds*2) io.status.custom.dasics.dlbound(i) := dlbound(i).regOut
-  for (i <- 0 until NumDasicsJmpBounds*2) io.status.custom.dasics.djbound(i) := djbound(i).regOut
 
   private val csrAccess = wenLegal || ren
 

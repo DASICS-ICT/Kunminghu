@@ -435,7 +435,6 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
     loadMisalignBuffer.io.writeBack.valid,
     loadMisalignBuffer.io.writeBack.bits,
     Mux(
-    Mux(
       atomicsUnit.io.out.valid,
       atomicsUnit.io.out.bits,
       loadUnits.head.io.ldout.bits
@@ -685,18 +684,18 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   val memDasicsResp = storeUnits.map(_.io.dasicsResp) ++ loadUnits.map(_.io.dasicsResp)
 
   memDasicsResp.map{resp =>
-    resp.mode := csrCtrl.dasics.mode
+    resp.mode := csrCtrl.privMode
     resp.dasics_fault := DasicsFaultReason.noDasicsFault
   }
     val dmconverter = Module(new DasicsMemConverter())
-    dmconverter.io.dasicsinfo <> csrCtrl.dasics
+    dmconverter.io.distribute_csr := csrCtrl.distribute_csr
   
     val dmcheckers = VecInit(Seq.fill(backendParams.LduCnt + backendParams.StaCnt)(
       Module(new DasicsMemChecker()).io
     )) //TODO: general dasics check port config
 
     for( (dmchecker,index) <- dmcheckers.zipWithIndex){
-      dmchecker.mode := dmconverter.io.mode
+      dmchecker.mode := csrCtrl.privMode
       dmchecker.resource := dmconverter.io.entries
       dmchecker.mainCfg  := dmconverter.io.maincfg
       dmchecker.req := memDasicsReq(index)

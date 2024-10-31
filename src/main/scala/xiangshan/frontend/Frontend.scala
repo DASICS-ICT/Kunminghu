@@ -125,13 +125,11 @@ class FrontendInlinedImp (outer: FrontendInlined) extends LazyModuleImp(outer)
 
   // DasicsTagger
   val dasicsTagger: DasicsTagger = Module(new DasicsTagger())
-  dasicsTagger.io.dasicsinfo := csrCtrl.dasics
   dasicsTagger.io.mode := tlbCsr.priv.imode
   dasicsTagger.io.addr := ifu.io.dasics.startAddr
   ifu.io.dasics.notTrusted := dasicsTagger.io.notTrusted
   // dasics branch checker
   val dasicsBrChecker: DasicsBranchChecker = Module(new DasicsBranchChecker())
-  dasicsBrChecker.io.dasicsinfo := csrCtrl.dasics
   dasicsBrChecker.io.mode := tlbCsr.priv.imode
   dasicsBrChecker.io.valid := ifu.io.dasics.lastBranch.valid
   dasicsBrChecker.io.lastBranch := ifu.io.dasics.lastBranch.bits

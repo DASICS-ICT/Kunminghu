@@ -25,7 +25,7 @@ import utility._
 import xiangshan.ExceptionNO._
 import xiangshan.backend.fu.DasicsFaultReason
 import xiangshan.backend.fu.DasicsRespDataBundle
-import xiangshan.backend.fu.csr.HasCSRConst
+import xiangshan.backend.fu.DasicsConst
 
 class IBufPtr(implicit p: Parameters) extends CircularQueuePtr[IBufPtr](
   p => p(XSCoreParamsKey).IBufSize
@@ -58,7 +58,7 @@ class IBufferIO(implicit p: Parameters) extends XSBundle {
   val stallReason = new StallReasonIO(DecodeWidth)
 }
 
-class IBufEntry(implicit p: Parameters) extends XSBundle {
+class IBufEntry(implicit p: Parameters) extends XSBundle with DasicsConst {
   val inst = UInt(32.W)
   val pc = UInt(VAddrBits.W)
   val foldpc = UInt(MemPredPCWidth.W)
@@ -111,7 +111,7 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
     cf.exceptionVec(instrGuestPageFault) := IBufferExceptionType.isGPF(this.exceptionType)
     cf.exceptionVec(instrAccessFault)    := IBufferExceptionType.isAF (this.exceptionType)
     cf.exceptionVec(EX_II)               := IBufferExceptionType.isRVCII(this.exceptionType)
-    cf.exceptionVec(dasicsUCheckFault)      := dasicsBrResp.dasics_fault === DasicsFaultReason.JumpDasicsFault && dasicsBrResp.mode === ModeU
+    cf.exceptionVec(dasicsUCheckFault)   := dasicsBrResp.dasics_fault === DasicsFaultReason.JumpDasicsFault && dasicsBrResp.mode === ModeU
     // cf.exceptionVec(dasicsSCheckFault)      := dasicsBrResp.dasics_fault === DasicsFaultReason.JumpDasicsFault && dasicsBrResp.mode === ModeS
     cf.exceptionFromBackend := exceptionFromBackend
     cf.trigger := triggered

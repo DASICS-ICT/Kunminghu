@@ -155,6 +155,8 @@ object FuType extends OHEnumeration {
   def isAlu(fuType: UInt): Bool = FuTypeOrR(fuType, Seq(alu))
   def isBrh(fuType: UInt): Bool = FuTypeOrR(fuType, Seq(brh))
 
+  def isVector(fuType: UInt): Bool = FuTypeOrR(fuType, vecAll)
+  
   def isVset(fuType: UInt): Bool = FuTypeOrR(fuType, vecVSET)
 
   def isJump(fuType: UInt): Bool = FuTypeOrR(fuType, jmp)

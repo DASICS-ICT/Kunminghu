@@ -866,6 +866,15 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
     }.otherwise {
       toICachePcBundle(i)    := pc_mem_ifu_ptr_rdata(i)
       toICacheEntryToSend(i) := copied_ifu_ptr_to_send(i)
+  // record last taken branch/jump info for dasics check
+  val s_initial  :: s_flushed :: s_valid :: Nil = Enum(3)
+
+  val lastJumpTargetReg = Reg(UInt(VAddrBits.W))
+  val lastJumpPCReg     = Reg(UInt(VAddrBits.W))
+  val lastJumpFtqIdxReg = Reg(new FtqPtr)
+  val lastJumpStateReg  = RegInit(s_initial)
+  val lastJumpActive    = WireInit(false.B)
+  val lastJumpShouldFlush = WireInit(false.B)
     }
   }
 
@@ -914,6 +923,58 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   io.toIfu.req.bits.nextStartAddr := entry_next_addr
   io.toIfu.req.bits.ftqOffset     := entry_ftq_offset
   io.toIfu.req.bits.fromFtqPcBundle(toIfuPcBundle)
+  io.toIfu.req.bits.lastJump.valid := lastJumpActive
+  io.toIfu.req.bits.lastJump.bits := lastJumpPCReg
+
+
+  def getBranchPc(startAddr: UInt, ftqOffset: UInt): UInt = {
+    val pcOffset = if (HasCExtension) (ftqOffset << 1.U).asUInt else (ftqOffset << 2.U).asUInt
+    startAddr + pcOffset
+  }
+  // process last branch regs
+  val thisPacketHasBranch    = io.toIfu.req.bits.ftqOffset.valid
+  val thisPacketBranchPC     = getBranchPc(io.toIfu.req.bits.startAddr, entry_ftq_offset.bits)
+  val thisPacketBranchTarget = io.toIfu.req.bits.nextStartAddr
+  val thisPacketFtqIdx       = io.toIfu.req.bits.ftqIdx
+  val thisPacketStartAddr    = io.toIfu.req.bits.startAddr
+  val thisPacketShouldFlush  = WireInit(false.B)
+
+  def lastJumpNotNull = lastJumpStateReg =/= s_initial
+
+  //  the recorded lastJump info should be passed to IFU
+  //    - when the state is Valid ( which means last Packet has a taken branch/jump )
+  //    - when the state is Flushed and the recorded target is the startAddr of current packet
+  //   ( which means the lastPacket has a taken branch/jump and this packet should be flushed by BPU)
+  lastJumpActive      := lastJumpStateReg === s_valid || 
+                           (lastJumpStateReg === s_flushed && 
+                            thisPacketStartAddr === lastJumpTargetReg)
+  // flush by BPU
+  lastJumpShouldFlush := lastJumpNotNull && (io.toIfu.flushFromBpu.shouldFlushByStage2(lastJumpFtqIdxReg) || 
+                                                 io.toIfu.flushFromBpu.shouldFlushByStage3(lastJumpFtqIdxReg))
+
+  when (io.toIfu.req.fire) {
+    //when Ftq send req to IFU, perform state machine transitions
+    when(lastJumpShouldFlush){
+      // recorded lastJump info has been flushed
+      lastJumpStateReg := s_initial
+    }.elsewhen (thisPacketShouldFlush){
+      // if has a recorded info ( Valid or Flushed ), turn to Flushed state
+      lastJumpStateReg := Mux(lastJumpNotNull, s_flushed, s_initial)
+    }.elsewhen (thisPacketHasBranch) { 
+      // there's a predicted taken/jump, recorded it & turn to Valid
+      lastJumpStateReg  := s_valid
+      lastJumpTargetReg := thisPacketBranchTarget
+      lastJumpPCReg     := thisPacketBranchPC
+      lastJumpFtqIdxReg := thisPacketFtqIdx
+    }.elsewhen (lastJumpStateReg === s_flushed) {  
+      // lastJump info is picked up ( if new packet address matches ), disable it
+      // Flushed state should remain until the end of the address comparison.
+      lastJumpStateReg := s_initial
+    }.elsewhen (lastJumpStateReg === s_valid) {  
+      // lastJump info is picked up, disable it
+      lastJumpStateReg := s_initial
+    }
+  }
 
   io.toICache.req.valid := entry_is_to_send && ifuPtr =/= bpuPtr
   io.toICache.req.bits.readValid.zipWithIndex.map { case (copy, i) =>
@@ -1141,6 +1202,7 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   ifuRedirectCfiUpdate.target    := pdWb.bits.target
   ifuRedirectCfiUpdate.taken     := pdWb.bits.cfiOffset.valid
   ifuRedirectCfiUpdate.isMisPred := pdWb.bits.misOffset.valid
+  ifuRedirectCfiUpdate.dasicsUntrusted := pdWb.bits.dasicsUntrusted(pdWb.bits.misOffset.bits)
 
   val ifuRedirectReg   = RegNextWithEnable(fromIfuRedirect, hasInit = true)
   val ifuRedirectToBpu = WireInit(ifuRedirectReg)
@@ -1288,6 +1350,16 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
     ifuPtrPlus2_write := idx + 3.U
     pfPtr_write       := next
     pfPtrPlus1_write  := idx + 2.U
+    //  backend & IFU redirect, change to initial
+    lastJumpStateReg := s_initial  
+    // special case: the redirect instruction is an untrusted mispredcted CFI, recorded lastJump info
+    when (r.cfiUpdate.isMisPred && r.cfiUpdate.taken && r.cfiUpdate.dasicsUntrusted) {
+      lastJumpStateReg  := s_valid
+      lastJumpPCReg     := r.cfiUpdate.pc
+      lastJumpFtqIdxReg := r.ftqIdx
+      lastJumpTargetReg := r.cfiUpdate.target
+    }
+    
   }
   when(RegNext(redirectVec.map(r => r.valid).reduce(_ || _))) {
     val r                          = PriorityMux(redirectVec.map(r => r.valid -> r.bits))

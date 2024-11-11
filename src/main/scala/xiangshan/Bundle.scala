@@ -48,6 +48,7 @@ import xiangshan.frontend.RASPtr
 import xiangshan.backend.rob.RobBundles.RobCommitEntryBundle
 import xiangshan.backend.trace._
 import xiangshan.mem.prefetch.PrefetchCtrl
+import xiangshan.backend.fu.DasicsInstInfo
 
 class ValidUndirectioned[T <: Data](gen: T) extends Bundle {
   val valid = Bool()
@@ -119,6 +120,7 @@ class CfiUpdateInfo(implicit p: Parameters) extends XSBundle with HasBPUParamete
   val target = UInt(VAddrBits.W)
   val taken = Bool()
   val isMisPred = Bool()
+  val dasicsUntrusted = Bool()
   val shift = UInt((log2Ceil(numBr)+1).W)
   val addIntoHist = Bool()
   // raise exceptions from backend
@@ -164,6 +166,8 @@ class CtrlFlow(implicit p: Parameters) extends XSBundle {
   val ftqPtr = new FtqPtr
   val ftqOffset = UInt(log2Up(PredictWidth).W)
   val isLastInFtqEntry = Bool()
+  // needs to be checked by Dasics
+  val dasics_inst_info = new DasicsInstInfo
 }
 
 

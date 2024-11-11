@@ -737,6 +737,29 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
 
   lsq.io.debugTopDown.robHeadMissInDTlb := dtlbRepeater.io.rob_head_miss_in_tlb
 
+  // Dasics
+  val memDasicsReq  = storeUnits.map(_.io.dasicsReq) ++ loadUnits.map(_.io.dasicsReq)
+  val memDasicsResp = storeUnits.map(_.io.dasicsResp) ++ loadUnits.map(_.io.dasicsResp)
+
+  memDasicsResp.map{resp =>
+    resp.mode := tlbcsr.priv.dmode
+    resp.dasics_fault := DasicsFaultReason.noDasicsFault
+  }
+    val dmconverter = Module(new DasicsMemConverter())
+    dmconverter.io.distribute_csr := csrCtrl.distribute_csr
+  
+    val dmcheckers = VecInit(Seq.fill(backendParams.LduCnt + backendParams.StaCnt)(
+      Module(new DasicsMemChecker()).io
+    )) //TODO: general dasics check port config
+
+    for( (dmchecker,index) <- dmcheckers.zipWithIndex){
+      dmchecker.mode := tlbcsr.priv.dmode
+      dmchecker.resource := dmconverter.io.entries
+      dmchecker.mainCfg  := dmconverter.io.maincfg
+      dmchecker.req := memDasicsReq(index)
+      memDasicsResp(index) := dmchecker.resp
+    }
+
   // pmp
   val pmp = Module(new PMP())
   pmp.io.distribute_csr <> csrCtrl.distribute_csr

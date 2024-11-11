@@ -186,7 +186,7 @@ package object xiangshan {
   }
 
   object ExceptionVec {
-    val ExceptionVecSize = 24
+    val ExceptionVecSize = 27
     def apply() = Vec(ExceptionVecSize, Bool())
     def apply(init: Bool) = VecInit(Seq.fill(ExceptionVecSize)(init))
   }
@@ -709,6 +709,8 @@ package object xiangshan {
     def IMM_I  = "b0100".U
     def IMM_Z  = "b0101".U
     def INVALID_INSTR = "b0110".U
+    //def IMM_DIJ = "b0111".U
+
     def IMM_B6 = "b1000".U
 
     def IMM_OPIVIS = "b1001".U
@@ -730,6 +732,7 @@ package object xiangshan {
         IMM_UJ.litValue        -> "UJ",
         IMM_I.litValue         -> "I",
         IMM_Z.litValue         -> "Z",
+        //IMM_DIJ.litValue       -> "DIJ",
         IMM_B6.litValue        -> "B6",
         IMM_OPIVIS.litValue    -> "VIS",
         IMM_OPIVIU.litValue    -> "VIU",
@@ -750,6 +753,7 @@ package object xiangshan {
         IMM_UJ.litValue        -> ImmUnion.J,
         IMM_I.litValue         -> ImmUnion.I,
         IMM_Z.litValue         -> ImmUnion.Z,
+        //IMM_DIJ.litValue       -> ImmUnion.DIJ,
         IMM_B6.litValue        -> ImmUnion.B6,
         IMM_OPIVIS.litValue    -> ImmUnion.OPIVIS,
         IMM_OPIVIU.litValue    -> ImmUnion.OPIVIU,
@@ -842,6 +846,10 @@ package object xiangshan {
     def loadGuestPageFault  = 21
     def virtualInstr        = 22
     def storeGuestPageFault = 23
+    def dasicsJumpFault     = 24
+    def dasicsLoadFault     = 25
+    def dasicsStoreFault    = 26
+
 
     // Just alias
     def EX_IAM    = instrAddrMisaligned
@@ -864,6 +872,9 @@ package object xiangshan {
     def EX_LGPF   = loadGuestPageFault
     def EX_VI     = virtualInstr
     def EX_SGPF   = storeGuestPageFault
+    def EX_DJF    = dasicsJumpFault
+    def EX_DLF    = dasicsLoadFault
+    def EX_DSF    = dasicsStoreFault
 
     def getAddressMisaligned = Seq(EX_IAM, EX_LAM, EX_SAM)
 
@@ -877,9 +888,11 @@ package object xiangshan {
 
     def getFetchFault = Seq(EX_IAM, EX_IAF, EX_IPF)
 
-    def getLoadFault = Seq(EX_LAM, EX_LAF, EX_LPF)
+    def getLoadFault = Seq(EX_LAM, EX_LAF, EX_LPF, EX_DLF)
 
-    def getStoreFault = Seq(EX_SAM, EX_SAF, EX_SPF)
+    def getStoreFault = Seq(EX_SAM, EX_SAF, EX_SPF, EX_DSF)
+
+    def getDasicsFault = Seq(EX_DJF, EX_DLF, EX_DSF)
 
     def priorities = Seq(
       doubleTrap,
@@ -899,6 +912,9 @@ package object xiangshan {
       loadGuestPageFault,
       storeAccessFault,
       loadAccessFault,
+      dasicsJumpFault,
+      dasicsLoadFault,
+      dasicsStoreFault,
       hardwareError
     )
 
@@ -916,7 +932,13 @@ package object xiangshan {
       instrPageFault,
       instrGuestPageFault,
       virtualInstr,
-      breakPoint
+      breakPoint,
+      dasicsJumpFault
+    )
+    def dasicsSet = Seq(
+      dasicsJumpFault,
+      dasicsLoadFault,
+      dasicsStoreFault
     )
     def partialSelect(vec: Vec[Bool], select: Seq[Int]): Vec[Bool] = {
       val new_vec = Wire(ExceptionVec())
@@ -930,6 +952,7 @@ package object xiangshan {
       select.diff(unSelect).foreach(i => new_vec(i) := vec(i))
       new_vec
     }
+    def selectDasics(vec:Vec[Bool]): Vec[Bool] = partialSelect(vec, dasicsSet)
     def selectFrontend(vec: Vec[Bool]): Vec[Bool] = partialSelect(vec, frontendSet)
     def selectAll(vec: Vec[Bool]): Vec[Bool] = partialSelect(vec, ExceptionNO.all)
     def selectByFu(vec:Vec[Bool], fuConfig: FuConfig): Vec[Bool] =

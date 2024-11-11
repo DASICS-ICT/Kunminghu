@@ -37,6 +37,7 @@ import xiangshan.mem.Bundles._
 import xiangshan.cache._
 import xiangshan.cache.wpu.ReplayCarry
 import xiangshan.cache.mmu._
+import xiangshan.backend.fu.{DasicsReqBundle,DasicsRespBundle,DasicsOp,DasicsConst,DasicsFaultReason}
 
 class LoadToLsqReplayIO(implicit p: Parameters) extends XSBundle
   with HasDCacheParameters
@@ -114,6 +115,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   with HasCircularQueuePtrHelper
   with HasVLSUParameters
   with SdtrigExt
+  with DasicsConst
 {
   val io = IO(new Bundle() {
     // control
@@ -206,6 +208,10 @@ class LoadUnit(implicit p: Parameters) extends XSModule
     val debug_ls         = Output(new DebugLsInfoBundle)
     val lsTopdownInfo    = Output(new LsTopdownInfo)
     val correctMissTrain = Input(Bool())
+
+    // Dasics
+    val dasicsReq = ValidIO(new DasicsReqBundle())
+    val dasicsResp = Flipped(new DasicsRespBundle())
   })
 
   val s1_ready, s2_ready, s3_ready = WireInit(false.B)
@@ -1132,6 +1138,11 @@ class LoadUnit(implicit p: Parameters) extends XSModule
     p"S1: pc ${Hexadecimal(s1_out.uop.pc)}, lId ${Hexadecimal(s1_out.uop.lqIdx.asUInt)}, tlb_miss ${io.tlb.resp.bits.miss}, " +
     p"paddr ${Hexadecimal(s1_out.paddr)}, mmio ${s1_out.mmio}\n")
 
+  io.dasicsReq.valid := s1_fire 
+  io.dasicsReq.bits.addr := s1_out.vaddr
+  io.dasicsReq.bits.inUntrustedZone := s1_out.uop.dasics_inst_info.Untrusted
+  io.dasicsReq.bits.operation := DasicsOp.read
+
   // Pipeline
   // --------------------------------------------------------------------------------
   // stage 2
@@ -1183,6 +1194,8 @@ class LoadUnit(implicit p: Parameters) extends XSModule
       (s2_isvec || s2_frm_mabuf) && s2_actually_uncache && !s2_prf && !s2_in.tlbMiss ||
       io.dcache.resp.bits.tag_error && GatedValidRegNext(io.csrCtrl.cache_error_enable)
     )
+    //Dasics load access fault
+    s2_exception_vec(dasicsLoadFault) := io.dasicsResp.dasics_fault === DasicsFaultReason.LoadDasicsFault && io.dasicsResp.mode === ModeU
   }
 
   // soft prefetch will not trigger any exception (but ecc error interrupt may

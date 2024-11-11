@@ -55,6 +55,7 @@ class BranchUnit(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg) {
       redirect.bits.ftqOffset := io.in.bits.ctrl.ftqOffset.get
       redirect.bits.fullTarget := addModule.io.target
       redirect.bits.cfiUpdate.isMisPred := dataModule.io.mispredict
+      redirect.bits.cfiUpdate.dasicsUntrusted := io.in.bits.dasics_inst_info.Untrusted
       redirect.bits.cfiUpdate.taken := dataModule.io.taken
       redirect.bits.cfiUpdate.predTaken := dataModule.io.pred_taken
       redirect.bits.cfiUpdate.target := addModule.io.target

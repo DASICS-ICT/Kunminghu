@@ -24,6 +24,7 @@ import xiangshan.mem.{LqPtr, SqPtr}
 import yunsuan.vector.VIFuParam
 import xiangshan.backend.trace._
 import utility._
+import xiangshan.backend.fu.DasicsInstInfo
 
 object Bundles {
   /**
@@ -53,6 +54,7 @@ object Bundles {
     val ftqPtr           = new FtqPtr
     val ftqOffset        = UInt(log2Up(PredictWidth).W)
     val isLastInFtqEntry = Bool()
+    val dasics_inst_info = new DasicsInstInfo
 
     def connectCtrlFlow(source: CtrlFlow): Unit = {
       this.instr            := source.instr
@@ -67,6 +69,7 @@ object Bundles {
       this.ftqPtr           := source.ftqPtr
       this.ftqOffset        := source.ftqOffset
       this.isLastInFtqEntry := source.isLastInFtqEntry
+      this.dasics_inst_info := source.dasics_inst_info
     }
   }
 
@@ -117,7 +120,7 @@ object Bundles {
     val numWB           = UInt(log2Up(MaxUopSize).W) // rob need this
     val commitType      = CommitType() // Todo: remove it
     val needFrm         = new NeedFrmBundle
-
+    val dasics_inst_info = new DasicsInstInfo
     val debug_fuType    = OptionWrapper(backendParams.debugEn, FuType())
 
     private def allSignals = srcType.take(3) ++ Seq(fuType, fuOpType, rfWen, fpWen, vecWen,
@@ -248,6 +251,8 @@ object Bundles {
     val debug_fuType    = OptionWrapper(backendParams.debugEn, FuType())
 
     val numLsElem       = NumLsElem()
+
+    val dasics_inst_info = new DasicsInstInfo
 
     def getDebugFuType: UInt = debug_fuType.getOrElse(fuType)
 
@@ -645,7 +650,7 @@ object Bundles {
     val loadDependency = OptionWrapper(params.needLoadDependency, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
 
     val perfDebugInfo = new PerfDebugInfo()
-
+    val dasics_inst_info = new DasicsInstInfo
     def exuIdx = this.params.exuIdx
 
     def fromIssueBundle(source: IssueQueueIssueBundle): Unit = {
@@ -683,6 +688,8 @@ object Bundles {
       this.numLsElem     .foreach(_ := source.common.numLsElem.get)
       this.srcTimer      .foreach(_ := source.common.srcTimer.get)
       this.loadDependency.foreach(_ := source.common.loadDependency.get.map(_ << 1))
+      //dasics
+      this.dasics_inst_info := source.common.dasics_inst_info
     }
   }
 
@@ -728,6 +735,7 @@ object Bundles {
     })
     val debug = new DebugBundle
     val debugInfo = new PerfDebugInfo
+    val dasics_inst_info = new DasicsInstInfo
   }
 
   // ExuOutput + DynInst --> WriteBackBundle
@@ -748,6 +756,7 @@ object Bundles {
     val exceptionVec = ExceptionVec()
     val debug = new DebugBundle
     val debugInfo = new PerfDebugInfo
+    val dasics_inst_info = new DasicsInstInfo
 
     this.wakeupSource = s"WB(${params.toString})"
 
@@ -769,6 +778,7 @@ object Bundles {
       this.exceptionVec := source.exceptionVec.getOrElse(0.U.asTypeOf(this.exceptionVec))
       this.debug := source.debug
       this.debugInfo := source.debugInfo
+      this.dasics_inst_info := source.dasics_inst_info
     }
 
     def asIntRfWriteBundle(fire: Bool): RfWritePortWithConfig = {
@@ -853,6 +863,7 @@ object Bundles {
     val instr = UInt(32.W)
     val commitType = CommitType()
     val exceptionVec = ExceptionVec()
+    val lastJumpPc = UInt(XLEN.W)
     val isPcBkpt = Bool()
     val isFetchMalAddr = Bool()
     val gpaddr = UInt(XLEN.W)

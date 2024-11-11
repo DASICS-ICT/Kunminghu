@@ -6,6 +6,7 @@ import chisel3.util.experimental.decode.TruthTable
 import freechips.rocketchip.rocket.CSRs
 import xiangshan.backend.fu.NewCSR.CSRBundles.{Counteren, PrivState}
 import xiangshan.backend.fu.NewCSR.CSRDefines._
+import xiangshan.backend.fu.DasicsConst
 
 class CSRPermitModule extends Module {
   val io = IO(new CSRPermitIO)
@@ -154,7 +155,7 @@ class XRetPermitModule extends Module {
   io.out.hasLegalDret  := dret  && !dretIllegal
 }
 
-class MLevelPermitModule extends Module {
+class MLevelPermitModule extends Module with DasicsConst{
   val io = IO(new Bundle() {
     val in = Input(new Bundle {
       val csrAccess = new csrAccessIO
@@ -224,6 +225,8 @@ class MLevelPermitModule extends Module {
 
   private val rwStopei_EX_II = privState.isModeHS && mvienSEIE && (addr === CSRs.stopei.U)
 
+
+
   /**
    * Sm/Ssstateen0 begin
    */
@@ -271,11 +274,11 @@ class MLevelPermitModule extends Module {
   // csr addr HVS: [0x6c0, 0x6ff], [0xac0, 0xaff], [0xec0, 0xeff]
   private val csrIsHVSCustom = (addr(11, 10) =/= "b00".U) && (addr(9, 8) === "b10".U) && (addr(7, 6) === "b11".U)
   // [0x5c0, 0x5ff], [0x9c0, 0x9ff], [0xdc0, 0xdff]
-  private val csrIsSCustom   = (addr(11, 10) =/= "b00".U) && (addr(9, 8) === "b01".U) && (addr(7, 6) === "b11".U)
+  private val csrIsSCustom   = ((addr(11, 10) =/= "b00".U) && (addr(9, 8) === "b01".U) && (addr(7, 6) === "b11".U)) && !isSDasics(addr)
   // [0x800, 0x8ff], [0xcc0, 0xcff]
-  private val csrIsUCustom   = (addr(11, 8) === "b1000".U) || (addr(11, 6) === "b110011".U)
+  private val csrIsUCustom   = ((addr(11, 8) === "b1000".U) || (addr(11, 6) === "b110011".U)) && !isUDasics(addr)
   private val allCustom      = csrIsHVSCustom || csrIsSCustom || csrIsUCustom
-  private val accessCustom_EX_II = allCustom && !privState.isModeM && !mstateen0.C.asBool
+  private val accessCustom_EX_II = allCustom && !privState.isModeM && !mstateen0.C.asBool 
 
   val xstateControlAccess_EX_II = accessStateen0_EX_II || accessEnvcfg_EX_II || accessIND_EX_II || accessAIA_EX_II ||
     accessTopie_EX_II || accessContext_EX_II || accessCustom_EX_II
@@ -289,7 +292,7 @@ class MLevelPermitModule extends Module {
   io.out.hasLegalWriteVcsr := wen && csrIsWritableVec && !vsEffectiveOff
 }
 
-class SLevelPermitModule extends Module {
+class SLevelPermitModule extends Module with DasicsConst{
   val io = IO(new Bundle() {
     val in = Input(new Bundle {
       val csrAccess = new csrAccessIO
@@ -316,10 +319,17 @@ class SLevelPermitModule extends Module {
 
   private val accessHPM_EX_II = csrIsHPM && privState.isModeHU && !scounteren(counterAddr)
 
-  private val csrIsUCustom   = (addr(11, 8) === "b1000".U) || (addr(11, 6) === "b110011".U)
+  private val csrIsUCustom   = (addr(11, 8) === "b1000".U) || (addr(11, 6) === "b110011".U) && !isUDasics(addr)
   private val accessCustom_EX_II = csrIsUCustom && privState.isModeHU && !sstateen0.C.asBool
 
-  io.out.sLevelPermit_EX_II := accessHPM_EX_II || accessCustom_EX_II
+  // DASICS privilege check
+  private val Dasics_EX_II  = csrAccess && (
+      (isUDasics(addr) && (privState.isVirtual || privState.isModeHU && io.in.dasicsUntrusted)) || // M, S, U trusted
+      (isSDasics(addr) && (privState.isVirtual || privState.isModeHU)) // only M and S
+//        || (isUDasics(addr) || isSDasics(addr)) && ...  <- reserved
+  )
+
+  io.out.sLevelPermit_EX_II := accessHPM_EX_II || accessCustom_EX_II || Dasics_EX_II
 }
 
 class PrivilegePermitModule extends Module {
@@ -603,6 +613,7 @@ class CSRPermitIO extends Bundle {
     val xenvcfg = new xenvcfgIO
     val xstateen = new xstateenIO
     val aia = new aiaIO
+    val dasicsUntrusted = Bool()
   })
 
   val out = Output(new Bundle {

@@ -58,6 +58,7 @@ object Bundles {
     val tlbMiss = Bool()
     val ptwBack = Bool()
     val af = Bool()
+    val dsf = Bool()
     val nc = Bool()
     val mmio = Bool()
     val memBackTypeMM = Bool() // 1: main memory, 0: IO
@@ -153,6 +154,7 @@ object Bundles {
       if (latch) tlbMiss := RegEnable(input.tlbMiss, enable) else tlbMiss := input.tlbMiss
       if (latch) ptwBack := RegEnable(input.ptwBack, enable) else ptwBack := input.ptwBack
       if (latch) af := RegEnable(input.af, enable) else af := input.af
+      if (latch) dsf := RegEnable(input.dsf, enable) else dsf := input.dsf
       if (latch) nc := RegEnable(input.nc, enable) else nc := input.nc
       if (latch) mmio := RegEnable(input.mmio, enable) else mmio := input.mmio
       if (latch) memBackTypeMM := RegEnable(input.memBackTypeMM, enable) else memBackTypeMM := input.memBackTypeMM

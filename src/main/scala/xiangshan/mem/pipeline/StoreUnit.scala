@@ -24,6 +24,7 @@ import utility._
 import xiangshan._
 import xiangshan.ExceptionNO._
 import xiangshan.backend.Bundles.{MemExuInput, MemExuOutput, connectSamePort}
+import xiangshan.backend.fu._
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.fu.FuConfig._
 import xiangshan.backend.fu.FuType._
@@ -36,6 +37,7 @@ import xiangshan.cache.{DCacheStoreIO, DcacheStoreRequestIO, HasDCacheParameters
 class StoreUnit(implicit p: Parameters) extends XSModule
   with HasDCacheParameters
   with HasVLSUParameters
+  with DasicsConst
   {
   val io = IO(new Bundle() {
     val redirect        = Flipped(ValidIO(new Redirect))
@@ -72,6 +74,9 @@ class StoreUnit(implicit p: Parameters) extends XSModule
     val fromCsrTrigger = Input(new CsrTriggerBundle)
 
     val s0_s1_valid = Output(Bool())
+    //Dasics
+    val dasicsReq = ValidIO(new DasicsReqBundle())
+    val dasicsResp = Flipped(new DasicsRespBundle())
   })
 
   val s1_ready, s2_ready, s3_ready = WireInit(false.B)
@@ -411,6 +416,11 @@ class StoreUnit(implicit p: Parameters) extends XSModule
                       GatedValidRegNext(io.csrCtrl.hd_misalign_st_enable) && s1_in.isMisalign && !s1_in.misalignWith16Byte &&
                       !s1_trigger_breakpoint && !s1_trigger_debug_mode
 
+  io.dasicsReq.valid := s1_fire 
+  io.dasicsReq.bits.addr := s1_out.vaddr
+  io.dasicsReq.bits.inUntrustedZone := s1_out.uop.dasics_inst_info.Untrusted
+  io.dasicsReq.bits.operation := DasicsOp.write
+
   // Pipeline
   // --------------------------------------------------------------------------------
   // stage 2
@@ -451,6 +461,7 @@ class StoreUnit(implicit p: Parameters) extends XSModule
 
   s2_out        := s2_in
   s2_out.af     := s2_out.uop.exceptionVec(storeAccessFault)
+  s2_out.dsf    := s2_out.uop.exceptionVec(dasicsStoreFault)
   s2_out.mmio   := s2_mmio && !s2_exception
   s2_out.atomic := s2_in.atomic || Pbmt.isPMA(s2_pbmt) && s2_pmp.atomic
   s2_out.memBackTypeMM := s2_memBackTypeMM
@@ -459,6 +470,8 @@ class StoreUnit(implicit p: Parameters) extends XSModule
                                                 ((s2_in.isvec || s2_frm_mabuf || s2_isCbo) && s2_actually_uncache && RegNext(s1_feedback.bits.hit))
                                                 ) && s2_vecActive
   s2_out.uop.exceptionVec(storeAddrMisaligned) := s2_mmio && s2_in.isMisalign && !s2_un_misalign_exception
+  //Dasics store access fault
+  s2_out.uop.exceptionVec(dasicsStoreFault) := io.dasicsResp.dasics_fault === DasicsFaultReason.StoreDasicsFault && io.dasicsResp.mode === ModeU
   s2_out.uop.vpu.vstart     := s2_in.vecVaddrOffset >> s2_in.uop.vpu.veew
 
   // kill dcache write intent request when mmio or exception
@@ -496,13 +509,14 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   io.lsq_replenish.af := s2_out.af && s2_valid && !s2_kill
   io.lsq_replenish.mmio := (s2_mmio || s2_isCbo_noZero) && !s2_exception // reuse `mmiostall` logic in sq
 
+  io.lsq_replenish.dsf := s2_out.dsf && s2_valid && !s2_kill
   // prefetch related
   io.lsq_replenish.miss := io.dcache.resp.fire && io.dcache.resp.bits.miss // miss info
   io.lsq_replenish.updateAddrValid := !s2_mis_align && (!s2_frm_mabuf || s2_out.isFinalSplit) || s2_exception
   io.lsq_replenish.isvec := s2_out.isvec || s2_frm_mab_vec
 
   io.lsq_replenish.hasException := (ExceptionNO.selectByFu(s2_out.uop.exceptionVec, StaCfg).asUInt.orR ||
-    TriggerAction.isDmode(s2_out.uop.trigger) || s2_out.af) && s2_valid && !s2_kill
+    TriggerAction.isDmode(s2_out.uop.trigger) || s2_out.af || s2_out.dsf) && s2_valid && !s2_kill
 
 
   // RegNext prefetch train for better timing

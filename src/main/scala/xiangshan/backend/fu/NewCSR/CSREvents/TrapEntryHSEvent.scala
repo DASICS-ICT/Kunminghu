@@ -48,6 +48,8 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
     in.trapPc,
   )
 
+  private val trapLjPc = in.dasicsLastJumpPc
+
   private val trapPCGPA = SignExt(in.trapPcGPA, XLEN)
 
   private val trapMemVA = in.memExceptionVAddr
@@ -62,6 +64,7 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
   private val isFetchExcp    = isException && ExceptionNO.getFetchFault.map(_.U === highPrioTrapNO).reduce(_ || _)
   private val isMemExcp      = isException && (ExceptionNO.getLoadFault ++ ExceptionNO.getStoreFault).map(_.U === highPrioTrapNO).reduce(_ || _)
   private val isBpExcp       = isException && ExceptionNO.EX_BP.U === highPrioTrapNO
+  private val isDsJExcp      = isException && ExceptionNO.EX_DJF.U === highPrioTrapNO
   private val isFetchBkpt    = isBpExcp && in.isFetchBkpt
   private val isMemBkpt      = isBpExcp && !in.isFetchBkpt
   private val isHlsExcp      = isException && in.isHls
@@ -73,7 +76,7 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
   private val isFetchGuestExcp = isException && ExceptionNO.EX_IGPF.U === highPrioTrapNO
   // Software breakpoint exceptions are permitted to write either 0 or the pc to xtval
   // We fill pc here
-  private val tvalFillPc       = (isFetchExcp || isFetchGuestExcp) && !fetchCrossPage || isFetchBkpt
+  private val tvalFillPc       = (isFetchExcp || isFetchGuestExcp) && !fetchCrossPage || isFetchBkpt || isDsJExcp
   private val tvalFillPcPlus2  = (isFetchExcp || isFetchGuestExcp) && fetchCrossPage
   private val tvalFillMemVaddr = isMemExcp || isMemBkpt
   private val tvalFillGVA      =
@@ -129,7 +132,7 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
     // SPVP is not PrivMode enum type, so asUInt and shrink the width
   out.hstatus.bits.SPVP         := Mux(!current.privState.isVirtual, in.hstatus.SPVP.asUInt, current.privState.PRVM.asUInt(0, 0))
   out.hstatus.bits.GVA          := tvalFillGVA
-  out.sepc.bits.epc             := Mux(isFetchMalAddr, in.fetchMalTval(63, 1), trapPC(63, 1))
+  out.sepc.bits.epc             := Mux(isDsJExcp,trapLjPc(XLEN - 1, 1),Mux(isFetchMalAddr, in.fetchMalTval(XLEN - 1, 1), trapPC(XLEN - 1, 1)))
   out.scause.bits.Interrupt     := isInterrupt
   out.scause.bits.ExceptionCode := highPrioTrapNO
   out.stval.bits.ALL            := Mux(isFetchMalAddr, in.fetchMalTval, tval)

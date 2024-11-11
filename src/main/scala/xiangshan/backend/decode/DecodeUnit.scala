@@ -898,7 +898,11 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
     io.fromCSR.virtualInst.cboI       && isCboInval
 
 
-  decodedInst.exceptionVec(illegalInstr) := exceptionII || io.enq.ctrlFlow.exceptionVec(EX_II)
+  // dasics decode check
+  private val illegalDasics = (FuType.isVector(decodedInst.fuType) && !io.fromCSR.illegalInst.dasicsIsOff && ctrl_flow.dasics_inst_info.Untrusted)
+                            // no vector when dasics enable and in untrusted zone
+                            
+  decodedInst.exceptionVec(illegalInstr) := exceptionII || io.enq.ctrlFlow.exceptionVec(EX_II) || illegalDasics
   decodedInst.exceptionVec(virtualInstr) := exceptionVI
 
   //update exceptionVec: from frontend trigger's breakpoint exception. To reduce 1 bit of overhead in ibuffer entry.

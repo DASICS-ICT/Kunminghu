@@ -102,6 +102,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       in.bits.mnret := isMNret
       in.bits.sret := isSret
       in.bits.dret := isDret
+      in.bits.dasics_inst_info :=io.in.bits.dasics_inst_info
   }
   csrMod.io.trapInst := trapInstMod.io.currentTrapInst
   csrMod.io.fetchMalTval := trapTvalMod.io.tval
@@ -113,6 +114,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   csrMod.io.fromRob.trap.bits.pc := csrIn.exception.bits.pc
   csrMod.io.fromRob.trap.bits.instr := csrIn.exception.bits.instr
   csrMod.io.fromRob.trap.bits.pcGPA := csrIn.exception.bits.gpaddr
+  csrMod.io.fromRob.trap.bits.lastJumpPc := csrIn.exception.bits.lastJumpPc
   // Todo: shrink the width of trap vector.
   // We use 64bits trap vector in CSR, and 24 bits exceptionVec in exception bundle.
   csrMod.io.fromRob.trap.bits.trapVec := csrIn.exception.bits.exceptionVec.asUInt
@@ -267,6 +269,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   io.out.bits.ctrl.exceptionVec.get := exceptionVec
   io.out.bits.ctrl.flushPipe.get := flushPipe
   io.out.bits.res.data := csrMod.io.out.bits.rData
+  io.out.bits.dasics_inst_info := io.in.bits.dasics_inst_info
 
   /** initialize NewCSR's io_out_ready from wrapper's io */
   csrMod.io.out.ready := io.out.ready
@@ -280,6 +283,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   redirect.ftqOffset := io.in.bits.ctrl.ftqOffset.get
   redirect.cfiUpdate.predTaken := true.B
   redirect.cfiUpdate.taken := true.B
+  redirect.cfiUpdate.dasicsUntrusted := io.in.bits.dasics_inst_info.Untrusted
   redirect.cfiUpdate.target := csrMod.io.out.bits.targetPc.pc
   redirect.cfiUpdate.backendIPF := csrMod.io.out.bits.targetPc.raiseIPF
   redirect.cfiUpdate.backendIAF := csrMod.io.out.bits.targetPc.raiseIAF
@@ -411,6 +415,13 @@ class CSRToDecode(implicit p: Parameters) extends XSBundle {
      * raise EX_II when VS=Off
      */
     val vsIsOff = Bool()
+
+    /**
+     * decode all dasics inst
+     * raise EX_II when dasics is not enable
+     */
+
+    val dasicsIsOff = Bool()
 
     /**
      * illegal wfi

@@ -27,6 +27,7 @@ import xiangshan.frontend.icache._
 import utils._
 import utility._
 import xiangshan.backend.fu.{PMPReqBundle, PMPRespBundle}
+import xiangshan.backend.fu.{DasicsRespBundle, DasicsRespDataBundle}
 import xiangshan.backend.GPAMemEntry
 import utility.ChiselDB
 
@@ -69,6 +70,15 @@ class UncacheInterface(implicit p: Parameters) extends XSBundle {
   val toUncache   = DecoupledIO( new InsUncacheReq )
 }
 
+class IFUDasicsIO(implicit p: Parameters) extends XSBundle {
+  // for tagger
+  val startAddr: UInt = Output(UInt(VAddrBits.W))
+  val notTrusted: Vec[Bool] = Input(Vec(FetchWidth * 2, Bool()))
+  // for branch checker
+  val lastJump = ValidIO(UInt(VAddrBits.W))
+  val resp = Flipped(new DasicsRespBundle)
+}
+
 class NewIFUIO(implicit p: Parameters) extends XSBundle {
   val ftqInter         = new FtqInterface
   val icacheInter      = Flipped(new IFUICacheIO)
@@ -81,6 +91,7 @@ class NewIFUIO(implicit p: Parameters) extends XSBundle {
   val rob_commits      = Flipped(Vec(CommitWidth, Valid(new RobCommitInfo)))
   val iTLBInter        = new TlbRequestIO
   val pmp              = new ICachePMPBundle
+  val dasics              = new IFUDasicsIO
   val mmioCommitRead   = new mmioCommitRead
 }
 
@@ -336,7 +347,21 @@ class NewIFU(implicit p: Parameters) extends XSModule
 
   val f1_cut_ptr            = if(HasCExtension)  VecInit((0 until PredictWidth + 1).map(i =>  Cat(0.U(2.W), f1_ftq_req.startAddr(blockOffBits-1, 1)) + i.U ))
                                   else           VecInit((0 until PredictWidth).map(i =>     Cat(0.U(2.W), f1_ftq_req.startAddr(blockOffBits-1, 2)) + i.U ))
+  // create DASICS tags at IFU stage 1
+  io.dasics.startAddr := f1_ftq_req.startAddr
+  val f1_dasics_tag: Vec[Bool] = Wire(Vec(PredictWidth, Bool()))
+  if (HasCExtension) {
+    f1_dasics_tag := io.dasics.notTrusted
+  } else {  // not compressed, discard half of the tags
+    f1_dasics_tag.zipWithIndex.foreach { case (tag, i) => tag := io.dasics.notTrusted(i * 2) }
+  }
 
+  // for branch checker
+  io.dasics.lastJump.valid := f1_ftq_req.lastJump.valid
+  io.dasics.lastJump.bits := f1_ftq_req.lastJump.bits
+  val f1_dasics_br_resp = Wire(new DasicsRespDataBundle)
+  f1_dasics_br_resp.dasics_fault := io.dasics.resp.dasics_fault
+  f1_dasics_br_resp.mode := io.dasics.resp.mode
   /**
     ******************************************************************************
     * IFU Stage 2
@@ -476,7 +501,8 @@ class NewIFU(implicit p: Parameters) extends XSModule
   )})
   XSPerfAccumulate("fetch_bubble_icache_not_resp",   f2_valid && !icacheRespAllValid )
 
-
+  val f2_dasics_tag       = RegEnable(f1_dasics_tag, f1_fire)
+  val f2_dasics_br_resp  = RegEnable(f1_dasics_br_resp, f1_fire)
   /**
     ******************************************************************************
     * IFU Stage 3
@@ -555,6 +581,9 @@ class NewIFU(implicit p: Parameters) extends XSModule
   val f3_gpaddr         = RegEnable(f2_gpaddr,  f2_fire)
   val f3_isForVSnonLeafPTE        = RegEnable(f2_isForVSnonLeafPTE, f2_fire)
   val f3_resend_vaddr   = RegEnable(f2_resend_vaddr,             f2_fire)
+
+  val f3_dasics_tag     = RegEnable(f2_dasics_tag, f2_fire)
+  val f3_dasics_br_resp = RegEnable(f2_dasics_br_resp, f2_fire)
 
   // Expand 1 bit to prevent overflow when assert
   val f3_ftq_req_startAddr      = Cat(0.U(1.W), f3_ftq_req.startAddr)
@@ -847,7 +876,10 @@ class NewIFU(implicit p: Parameters) extends XSModule
     io.toIbuffer.bits.enqEnable := checkerOutStage1.fixedRange.asUInt & f3_instr_valid.asUInt & f3_lastHalf_mask
     io.toIbuffer.bits.valid     := f3_lastHalf_mask & f3_instr_valid.asUInt
   }
-
+  
+  io.toIbuffer.bits.dasicsUntrusted := f3_dasics_tag
+  io.toIbuffer.bits.dasicsJumpResp := f3_dasics_br_resp
+  io.toIbuffer.bits.lastJump := f3_ftq_req.lastJump.bits
   /** to backend */
   // f3_gpaddr is valid iff gpf is detected
   io.toBackend.gpaddrMem_wen   := f3_toIbuffer_valid && Mux(
@@ -883,6 +915,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   mmioFlushWb.bits.target     := Mux(mmio_is_RVC, f3_ftq_req.startAddr + 2.U , f3_ftq_req.startAddr + 4.U)
   mmioFlushWb.bits.jalTarget  := DontCare
   mmioFlushWb.bits.instrRange := f3_mmio_range
+  mmioFlushWb.bits.dasicsUntrusted := f3_dasics_tag
 
   val mmioRVCExpander = Module(new RVCExpander)
   mmioRVCExpander.io.in := Mux(f3_req_is_mmio, Cat(f3_mmio_data(1), f3_mmio_data(0)), 0.U)
@@ -943,6 +976,8 @@ class NewIFU(implicit p: Parameters) extends XSModule
   val wb_pc_high_plus1          = RegEnable(f3_pc_high_plus1, wb_enable)
   val wb_pc                     = CatPC(wb_pc_lower_result, wb_pc_high, wb_pc_high_plus1)
 
+  val wb_dasics_tag             = RegEnable(f3_dasics_tag, wb_enable)
+
   //val wb_pc             = RegEnable(f3_pc, wb_enable)
   val wb_pd             = RegEnable(f3_pd, wb_enable)
   val wb_instr_valid    = RegEnable(f3_instr_valid, wb_enable)
@@ -995,6 +1030,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   checkFlushWb.bits.target            := Mux(wb_half_flush, wb_half_target, wb_check_result_stage2.fixedTarget(checkFlushWbTargetIdx))
   checkFlushWb.bits.jalTarget         := wb_check_result_stage2.jalTarget(checkFlushWbjalTargetIdx)
   checkFlushWb.bits.instrRange        := wb_instr_range.asTypeOf(Vec(PredictWidth, Bool()))
+  checkFlushWb.bits.dasicsUntrusted   := wb_dasics_tag
 
   toFtq.pdWb := Mux(wb_valid, checkFlushWb,  mmioFlushWb)
 

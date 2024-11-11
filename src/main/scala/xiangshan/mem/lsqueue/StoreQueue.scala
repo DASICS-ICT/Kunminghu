@@ -504,6 +504,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
       uop(stWbIndex) := io.storeAddrIn(i).bits.uop
       uop(stWbIndex).debugInfo := io.storeAddrIn(i).bits.uop.debugInfo
+      uop(stWbIndex).dasics_inst_info := io.storeAddrIn(i).bits.uop.dasics_inst_info
 
       vecDataValid(stWbIndex) := io.storeAddrIn(i).bits.isvec
 
@@ -527,7 +528,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       mmio(stWbIndexReg) := io.storeAddrInRe(i).mmio
       atomic(stWbIndexReg) := io.storeAddrInRe(i).atomic
       hasException(stWbIndexReg) := ExceptionNO.selectByFu(uop(stWbIndexReg).exceptionVec, StaCfg).asUInt.orR ||
-                                    TriggerAction.isDmode(uop(stWbIndexReg).trigger) || io.storeAddrInRe(i).af
+                                    TriggerAction.isDmode(uop(stWbIndexReg).trigger) || io.storeAddrInRe(i).af || io.storeAddrInRe(i).dsf
       waitStoreS2(stWbIndexReg) := false.B
     }
     // dcache miss info (one cycle later than storeIn)
@@ -537,9 +538,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     }
     // enter exceptionbuffer again
     when (storeAddrInFireReg) {
-      exceptionBuffer.io.storeAddrIn(StorePipelineWidth + i).valid := io.storeAddrInRe(i).af && !io.storeAddrInRe(i).isvec
+      exceptionBuffer.io.storeAddrIn(StorePipelineWidth + i).valid := (io.storeAddrInRe(i).af || io.storeAddrInRe(i).dsf) && !io.storeAddrInRe(i).isvec
       exceptionBuffer.io.storeAddrIn(StorePipelineWidth + i).bits := RegEnable(io.storeAddrIn(i).bits, io.storeAddrIn(i).fire && !io.storeAddrIn(i).bits.miss)
       exceptionBuffer.io.storeAddrIn(StorePipelineWidth + i).bits.uop.exceptionVec(storeAccessFault) := io.storeAddrInRe(i).af
+      // dasics store fault
+      exceptionBuffer.io.storeAddrIn(StorePipelineWidth + i).bits.uop.exceptionVec(dasicsStoreFault) := io.storeAddrInRe(i).dsf
     }
 
     when(vaddrModule.io.wen(i)){

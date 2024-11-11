@@ -148,6 +148,7 @@ class TrapEntryEventInput(implicit val p: Parameters) extends Bundle with HasXSP
   val memExceptionIsForVSnonLeafPTE = Input(Bool())
   val virtualInterruptIsHvictlInject = Input(Bool())
   val hvictlIID = Input(UInt(HIIDWidth.W))
+  val dasicsLastJumpPc =  Input(UInt(XLEN.W))
 }
 
 trait EventSinkBundle { self: CSRModule[_ <: CSRBundle] =>

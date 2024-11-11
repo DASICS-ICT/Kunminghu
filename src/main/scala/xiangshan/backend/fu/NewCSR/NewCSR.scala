@@ -8,6 +8,7 @@ import org.chipsalliance.cde.config.Parameters
 import top.{ArgParser, Generator}
 import utility.{DataHoldBypass, DelayN, GatedValidRegNext, RegNextWithEnable, SignExt, ZeroExt, HPerfMonitor, PerfEvent}
 import utils.OptionWrapper
+import xiangshan.backend.fu._
 import xiangshan.backend.fu.NewCSR.CSRBundles.{CSRCustomState, PrivState, RobCommitCSR}
 import xiangshan.backend.fu.NewCSR.CSRDefines._
 import xiangshan.backend.fu.NewCSR.CSREnumTypeImplicitCast._
@@ -81,6 +82,7 @@ class NewCSRInput(implicit p: Parameters) extends Bundle {
   val mret = Input(Bool())
   val sret = Input(Bool())
   val dret = Input(Bool())
+  val dasics_inst_info = Input(new DasicsInstInfo)
 }
 
 class NewCSROutput(implicit p: Parameters) extends Bundle {
@@ -93,6 +95,7 @@ class NewCSROutput(implicit p: Parameters) extends Bundle {
   val regOut = UInt(64.W)
   // perf
   val isPerfCnt = Bool()
+  val dasics_inst_info = Input(new DasicsInstInfo)
 }
 
 class NewCSR(implicit val p: Parameters) extends Module
@@ -108,6 +111,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   with CSREvents
   with DebugLevel
   with CSRCustom
+  with DasicsConst
+  with CSRDasics
   with CSRPMP
   with IpIeAliasConnect
 {
@@ -132,6 +137,7 @@ class NewCSR(implicit val p: Parameters) extends Module
         val pcGPA = UInt(VaddrMaxWidth.W)
         val instr = UInt(InstWidth.W)
         val trapVec = UInt(64.W)
+        val lastJumpPc = UInt(XLEN.W)
         val isFetchBkpt = Bool()
         val singleStep = Bool()
         val trigger = TriggerAction()
@@ -232,6 +238,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   val hasTrap = io.fromRob.trap.valid
   val trapVec = io.fromRob.trap.bits.trapVec
   val trapPC = io.fromRob.trap.bits.pc
+  val trapLjPc = io.fromRob.trap.bits.lastJumpPc
   val trapPCGPA = io.fromRob.trap.bits.pcGPA
   val trapIsInterrupt = io.fromRob.trap.bits.isInterrupt
   val trapIsCrossPageIPF = io.fromRob.trap.bits.crossPageIPFFix
@@ -278,7 +285,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     debugCSRMap ++
     aiaCSRMap ++
     customCSRMap ++
-    pmpCSRMap
+    pmpCSRMap ++
+    dasicsCSRMap
 
   val csrMods: Seq[CSRModule[_]] =
     machineLevelCSRMods ++
@@ -289,7 +297,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     debugCSRMods ++
     aiaCSRMods ++
     customCSRMods ++
-    pmpCSRMods
+    pmpCSRMods ++
+    dasicsCSRMods
 
   var csrOutMap: SeqMap[Int, UInt] =
     machineLevelCSROutMap ++
@@ -300,7 +309,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     debugCSROutMap ++
     aiaCSROutMap ++
     customCSROutMap ++
-    pmpCSROutMap
+    pmpCSROutMap ++
+    dasicsCSROutMap
 
   // interrupt
   val nmip = RegInit(new NonMaskableIRPendingBundle, (new NonMaskableIRPendingBundle).init)
@@ -408,7 +418,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   permitMod.io.in.sret  := io.in.bits.sret  && valid
   permitMod.io.in.dret  := io.in.bits.dret  && valid
   permitMod.io.in.csrIsCustom := customCSRMods.map(_.addr.U === addr).reduce(_ || _).orR
-
+  permitMod.io.in.dasicsUntrusted := io.in.bits.dasics_inst_info.Untrusted
   permitMod.io.in.status.tsr := mstatus.regOut.TSR.asBool
   permitMod.io.in.status.vtsr := hstatus.regOut.VTSR.asBool
 
@@ -697,6 +707,8 @@ class NewCSR(implicit val p: Parameters) extends Module
 
         in.virtualInterruptIsHvictlInject := virtualInterruptIsHvictlInject
         in.hvictlIID := hvictl.regOut.IID.asUInt
+
+        in.dasicsLastJumpPc := trapLjPc
     }
   }
 
@@ -948,7 +960,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   needTargetUpdate)
   io.out.bits.targetPcUpdate := needTargetUpdate
   io.out.bits.isPerfCnt := DataHoldBypass(addrInPerfCnt, false.B, io.in.fire)
-
+  io.out.bits.dasics_inst_info := DataHoldBypass(io.in.bits.dasics_inst_info, io.in.fire)
   io.status.privState := privState
   io.status.fpState.frm := fcsr.frm
   io.status.fpState.off := mstatus.regOut.FS === ContextStatus.Off
@@ -1219,6 +1231,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.toDecode.virtualInst.hlsv       := isModeVS || isModeVU
   io.toDecode.illegalInst.fsIsOff    := mstatus.regOut.FS === ContextStatus.Off || (isModeVS || isModeVU) && vsstatus.regOut.FS === ContextStatus.Off
   io.toDecode.illegalInst.vsIsOff    := mstatus.regOut.VS === ContextStatus.Off || (isModeVS || isModeVU) && vsstatus.regOut.VS === ContextStatus.Off
+  io.toDecode.illegalInst.dasicsIsOff   := Mux(isModeHU, !dumcfg.regOut.UENA, false.B)
+
   io.toDecode.illegalInst.wfi        := isModeHU || !isModeM && mstatus.regOut.TW
   io.toDecode.virtualInst.wfi        := isModeVS && !mstatus.regOut.TW && hstatus.regOut.VTW || isModeVU && !mstatus.regOut.TW
   io.toDecode.illegalInst.frm        := frmIsReserved
@@ -1362,6 +1376,20 @@ class NewCSR(implicit val p: Parameters) extends Module
     diffHCSRState.vstval      := vstval.rdata.asUInt
     diffHCSRState.vsatp       := vsatp.rdata.asUInt
     diffHCSRState.vsscratch   := vsscratch.rdata.asUInt
+
+    val diffDasicsCSRState = DifftestModule(new DiffDasicsCSRState)
+    diffDasicsCSRState.coreid          := hartId
+    diffDasicsCSRState.dasicsMainCfg   := dumcfg.rdata.asUInt
+    diffDasicsCSRState.dasicsUMBoundLo := dumboundlo.rdata.asUInt
+    diffDasicsCSRState.dasicsUMBoundHi := dumboundhi.rdata.asUInt
+    diffDasicsCSRState.dasicsLibCfg    := dlcfg.rdata.asUInt
+    diffDasicsCSRState.dasicsMainCall  := dmaincall.rdata.asUInt
+    diffDasicsCSRState.dasicsReturnPC  := dretpc.rdata.asUInt
+    // diffDasicsCSRState.dasicsAZoneReturnPC := dretpcfz.rdata.asUInt
+//    diffDasicsCSRState.dasicsFReason := dfreason.rdata.asUInt
+    diffDasicsCSRState.dasicsJumpCfg   := djcfg.rdata.asUInt
+    for (i <- 0 until NumDasicsMemBounds*2) diffDasicsCSRState.dasicsLibBound(i) := dlbound(i).rdata.asUInt
+    for (i <- 0 until NumDasicsJmpBounds*2) diffDasicsCSRState.dasicsJumpBound(i) := djbound(i).rdata.asUInt
 
     val platformIRPMeipChange = !platformIRP.MEIP &&  RegNext(platformIRP.MEIP) ||
                                  platformIRP.MEIP && !RegNext(platformIRP.MEIP) ||

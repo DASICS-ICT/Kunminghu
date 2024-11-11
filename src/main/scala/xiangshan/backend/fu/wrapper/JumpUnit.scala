@@ -40,6 +40,7 @@ class JumpUnit(cfg: FuConfig)(implicit p: Parameters) extends PipedFuncUnit(cfg)
   redirect.fullTarget := jumpDataModule.io.target
   redirect.cfiUpdate.predTaken := true.B
   redirect.cfiUpdate.taken := true.B
+  redirect.cfiUpdate.dasicsUntrusted := io.in.bits.dasics_inst_info.Untrusted
   redirect.cfiUpdate.target := jumpDataModule.io.target
   redirect.cfiUpdate.pc := io.in.bits.data.pc.get
   redirect.cfiUpdate.isMisPred := jumpDataModule.io.target(VAddrData().dataWidth - 1, 0) =/= jmpTarget || !predTaken

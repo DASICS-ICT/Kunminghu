@@ -25,6 +25,7 @@ import utils._
 import utility._
 import xiangshan.cache.mmu.TlbResp
 import xiangshan.backend.fu.PMPRespBundle
+import xiangshan.backend.fu.DasicsRespDataBundle
 
 import scala.math._
 import java.util.ResourceBundle.Control
@@ -45,6 +46,9 @@ class FetchRequestBundle(implicit p: Parameters) extends XSBundle with HasICache
   val ftqOffset       = ValidUndirectioned(UInt(log2Ceil(PredictWidth).W))
 
   val topdown_info    = new FrontendTopDownBundle
+
+  // last jump pc for dasics check
+  val lastJump: ValidUndirectioned[UInt] = ValidUndirectioned(UInt(VAddrBits.W))
 
   def crossCacheline =  startAddr(blockOffBits - 1) === 1.U
 
@@ -108,6 +112,7 @@ class PredecodeWritebackBundle(implicit p:Parameters) extends XSBundle {
   val target       = UInt(VAddrBits.W)
   val jalTarget    = UInt(VAddrBits.W)
   val instrRange   = Vec(PredictWidth, Bool())
+  val dasicsUntrusted = Vec(PredictWidth, Bool())
 }
 
 class mmioCommitRead(implicit p: Parameters) extends XSBundle {
@@ -257,6 +262,10 @@ class FetchToIBuffer(implicit p: Parameters) extends XSBundle {
   val illegalInstr = Vec(PredictWidth, Bool())
   val triggered    = Vec(PredictWidth, TriggerAction())
   val isLastInFtqEntry = Vec(PredictWidth, Bool())
+
+  val dasicsUntrusted = Vec(PredictWidth, Bool())
+  val dasicsJumpResp = new DasicsRespDataBundle  // last branch to this instr block is illegal
+  val lastJump: UInt = UInt(VAddrBits.W)
 
   val pc        = Vec(PredictWidth, UInt(VAddrBits.W))
   val ftqPtr       = new FtqPtr

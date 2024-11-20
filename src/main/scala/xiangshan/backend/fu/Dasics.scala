@@ -372,12 +372,12 @@ class DasicsMemChecker(implicit p: Parameters) extends XSModule
   io.resp.mode := io.mode
 }
 
-class DasicsBranchChecker(implicit p: Parameters) extends XSModule
+class DasicsJumpChecker(implicit p: Parameters) extends XSModule
   with DasicsMethod 
   with DasicsCheckerMethod
   {
 
-    val io: DasicsBranchIO = IO(new DasicsBranchIO())
+    val io: DasicsJumpIO = IO(new DasicsJumpIO())
 
     val w = io.distribute_csr.w
 
@@ -406,16 +406,16 @@ class DasicsBranchChecker(implicit p: Parameters) extends XSModule
     private val boundLo = dasics_umain_bound_lo
     private val boundHi = dasics_umain_bound_hi
 
-    private val branchUntrusted = ((io.mode === ModeU && mainCfg.uEnable && !mainCfg.closeUJumpFault)) &&
+    private val jumpUntrusted = ((io.mode === ModeU && mainCfg.uEnable && !mainCfg.closeUJumpFault)) &&
       !dasics_jump_in_bound(
         addr = io.lastJump, boundHi = boundHi(VAddrBits - 1, 0), boundLo = boundLo(VAddrBits - 1, 0)
       )
     private val targetOutOfActive = dasics_jump_check(io.target, dasics_entries)
-    private val illegalBranch = io.valid && branchUntrusted && targetOutOfActive &&
+    private val illegalJump = io.valid && jumpUntrusted && targetOutOfActive &&
       (io.target =/= dasics_return_pc) && (io.target =/= dasics_main_call)/* && (io.target =/= dasics_azone_return_pc)*/
 
     io.resp.dasics_fault := Mux(
-      illegalBranch,
+      illegalJump,
       DasicsFaultReason.JumpDasicsFault,
       DasicsFaultReason.noDasicsFault
     )
@@ -493,7 +493,7 @@ class DasicsMainBound(implicit p: Parameters) extends XSBundle with DasicsConst 
   }
 }
 
-class DasicsBranchIO(implicit p: Parameters) extends XSBundle with DasicsConst {
+class DasicsJumpIO(implicit p: Parameters) extends XSBundle with DasicsConst {
   val distribute_csr: DistributedCSRIO = Flipped(new DistributedCSRIO())
   val mode: UInt = Input(UInt(2.W))
   val valid: Bool = Input(Bool())

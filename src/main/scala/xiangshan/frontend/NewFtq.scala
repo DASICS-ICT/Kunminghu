@@ -891,14 +891,14 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   io.toIfu.req.bits.lastJump.bits := lastJumpPCReg
 
 
-  def getBranchPc(startAddr: UInt, ftqOffset: UInt): UInt = {
+  def getJumpPc(startAddr: UInt, ftqOffset: UInt): UInt = {
     val pcOffset = if (HasCExtension) (ftqOffset << 1.U).asUInt else (ftqOffset << 2.U).asUInt
     startAddr + pcOffset
   }
   // process last branch regs
-  val thisPacketHasBranch    = io.toIfu.req.bits.ftqOffset.valid
-  val thisPacketBranchPC     = getBranchPc(io.toIfu.req.bits.startAddr, entry_ftq_offset.bits)
-  val thisPacketBranchTarget = io.toIfu.req.bits.nextStartAddr
+  val thisPacketHasJump    = io.toIfu.req.bits.ftqOffset.valid
+  val thisPacketJumpPc     = getJumpPc(io.toIfu.req.bits.startAddr, entry_ftq_offset.bits)
+  val thisPacketJumpTarget = io.toIfu.req.bits.nextStartAddr
   val thisPacketFtqIdx       = io.toIfu.req.bits.ftqIdx
   val thisPacketStartAddr    = io.toIfu.req.bits.startAddr
   val thisPacketShouldFlush  = WireInit(false.B)
@@ -924,11 +924,11 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
     }.elsewhen (thisPacketShouldFlush){
       // if has a recorded info ( Valid or Flushed ), turn to Flushed state
       lastJumpStateReg := Mux(lastJumpNotNull, s_flushed, s_initial)
-    }.elsewhen (thisPacketHasBranch) { 
+    }.elsewhen (thisPacketHasJump) { 
       // there's a predicted taken/jump, recorded it & turn to Valid
       lastJumpStateReg  := s_valid
-      lastJumpTargetReg := thisPacketBranchTarget
-      lastJumpPCReg     := thisPacketBranchPC
+      lastJumpTargetReg := thisPacketJumpTarget
+      lastJumpPCReg     := thisPacketJumpPc
       lastJumpFtqIdxReg := thisPacketFtqIdx
     }.elsewhen (lastJumpStateReg === s_flushed) {  
       // lastJump info is picked up ( if new packet address matches ), disable it

@@ -36,7 +36,7 @@ import org.chipsalliance.cde.config.Parameters
 import utility._
 import xiangshan._
 import xiangshan.backend.fu.{PFEvent, PMP, PMPChecker, PMPReqBundle}
-import xiangshan.backend.fu.{DasicsTagger, DasicsBranchChecker}
+import xiangshan.backend.fu.{DasicsTagger, DasicsJumpChecker}
 import xiangshan.cache.mmu._
 import xiangshan.frontend.icache._
 
@@ -145,7 +145,7 @@ class FrontendInlinedImp(outer: FrontendInlined) extends LazyModuleImp(outer)
   dasicsTagger.io.addr := ifu.io.dasics.startAddr
   ifu.io.dasics.notTrusted := dasicsTagger.io.notTrusted
   // dasics branch checker
-  val dasicsJumpChecker: DasicsBranchChecker = Module(new DasicsBranchChecker())
+  val dasicsJumpChecker: DasicsJumpChecker = Module(new DasicsJumpChecker())
   dasicsJumpChecker.io.mode := tlbCsr.priv.imode
   dasicsJumpChecker.io.valid := ifu.io.dasics.lastJump.valid
   dasicsJumpChecker.io.lastJump := ifu.io.dasics.lastJump.bits

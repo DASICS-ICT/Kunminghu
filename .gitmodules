@@ -28,3 +28,4 @@
 [submodule "difftest"]
 	path = difftest
 	url = git@github.com:DASICS-ICT/difftest.git
+	branch = dasics-kmh-dev

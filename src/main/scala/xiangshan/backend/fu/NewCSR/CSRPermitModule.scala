@@ -35,6 +35,7 @@ class CSRPermitModule extends Module {
   sLevelPermitMod.io.in.privState  := io.in.privState
   sLevelPermitMod.io.in.xcounteren := io.in.xcounteren
   sLevelPermitMod.io.in.xstateen   := io.in.xstateen
+  sLevelPermitMod.io.in.dasicsUntrusted := io.in.dasicsUntrusted
 
   privilegePermitMod.io.in.csrAccess := io.in.csrAccess
   privilegePermitMod.io.in.privState := io.in.privState
@@ -299,6 +300,7 @@ class SLevelPermitModule extends Module with DasicsConst{
       val privState = new PrivState
       val xcounteren = new xcounterenIO
       val xstateen = new xstateenIO
+      val dasicsUntrusted = Bool()
     })
     val out = Output(new Bundle {
       val sLevelPermit_EX_II = Bool()
@@ -323,7 +325,7 @@ class SLevelPermitModule extends Module with DasicsConst{
   private val accessCustom_EX_II = csrIsUCustom && privState.isModeHU && !sstateen0.C.asBool
 
   // DASICS privilege check
-  private val Dasics_EX_II  = csrAccess && (
+  private val Dasics_EX_II = (
       (isUDasics(addr) && (privState.isVirtual || privState.isModeHU && io.in.dasicsUntrusted)) || // M, S, U trusted
       (isSDasics(addr) && (privState.isVirtual || privState.isModeHU)) // only M and S
 //        || (isUDasics(addr) || isSDasics(addr)) && ...  <- reserved

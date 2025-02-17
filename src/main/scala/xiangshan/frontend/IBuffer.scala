@@ -49,7 +49,7 @@ class IBufferIO(implicit p: Parameters) extends XSBundle {
   val stallReason          = new StallReasonIO(DecodeWidth)
 }
 
-class IBufEntry(implicit p: Parameters) extends XSBundle {
+class IBufEntry(implicit p: Parameters) extends XSBundle with DasicsConst {
   val inst             = UInt(32.W)
   val pc               = UInt(VAddrBits.W)
   val foldpc           = UInt(MemPredPCWidth.W)

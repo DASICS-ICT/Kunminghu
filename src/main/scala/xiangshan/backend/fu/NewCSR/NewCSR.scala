@@ -476,7 +476,6 @@ class NewCSR(implicit val p: Parameters) extends Module
   permitMod.io.in.xRet.mret  := io.in.bits.mret  && valid
   permitMod.io.in.xRet.sret  := io.in.bits.sret  && valid
   permitMod.io.in.xRet.dret  := io.in.bits.dret  && valid
-  permitMod.io.in.csrIsCustom := customCSRMods.map(_.addr.U === addr).reduce(_ || _).orR
   permitMod.io.in.dasicsUntrusted := io.in.bits.dasics_inst_info.Untrusted
 
   permitMod.io.in.status.tsr := mstatus.regOut.TSR.asBool

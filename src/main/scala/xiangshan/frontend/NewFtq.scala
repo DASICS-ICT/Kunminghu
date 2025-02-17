@@ -866,6 +866,9 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
     }.otherwise {
       toICachePcBundle(i)    := pc_mem_ifu_ptr_rdata(i)
       toICacheEntryToSend(i) := copied_ifu_ptr_to_send(i)
+    }
+  }
+  
   // record last taken branch/jump info for dasics check
   val s_initial  :: s_flushed :: s_valid :: Nil = Enum(3)
 
@@ -875,8 +878,6 @@ class Ftq(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelpe
   val lastJumpStateReg  = RegInit(s_initial)
   val lastJumpActive    = WireInit(false.B)
   val lastJumpShouldFlush = WireInit(false.B)
-    }
-  }
 
   // Calculate requests sent to prefetcher one cycle in advance to cut critical path
   when(bpu_in_fire && bpu_in_resp_ptr === pfPtr_write) {

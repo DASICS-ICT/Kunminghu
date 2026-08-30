@@ -9,6 +9,7 @@ import xiangshan.backend.fu.NewCSR.CSRDefines.{
   CSRROField => RO,
 }
 import xiangshan.HasXSParameter
+import xiangshan.backend.rename.RegisterPressureCSR
 
 import scala.collection.immutable.SeqMap
 
@@ -48,7 +49,38 @@ trait CSRCustom { self: NewCSR =>
   })
     .setAddr(0xBC1)
 
-  val customCSRMods = Seq(
+  val registerPressureDataCSR = if (EnableRegisterPressureMonitor) {
+    Some(Module(new RegisterPressureDataCSR).setAddr(RegisterPressureCSR.DataAddress))
+  } else {
+    None
+  }
+
+  val registerPressureCSRMods: Seq[CSRModule[_ <: CSRBundle]] = if (EnableRegisterPressureMonitor) {
+    val command = Module(new CSRModule("RegisterPressureCommand", new CSRBundle {
+      val ALL = RO(63, 0)
+    }) {
+      regOut.ALL := 0.U
+    }).setAddr(RegisterPressureCSR.ControlAddress)
+
+    val index = Module(new CSRModule("RegisterPressureIndex", new CSRBundle {
+      val ALL = RO(63, 0)
+    }) {
+      regOut.ALL := 0.U
+    }).setAddr(RegisterPressureCSR.IndexAddress)
+
+    val info = Module(new CSRModule("RegisterPressureInfo", new CSRBundle {
+      val ALL = RO(63, 0)
+    }) {
+      regOut.ALL := 0.U
+      rdata := RegisterPressureCSR.AbiInfo.U(64.W)
+    }).setAddr(RegisterPressureCSR.InfoAddress)
+
+    Seq(command, index, info, registerPressureDataCSR.get)
+  } else {
+    Seq.empty
+  }
+
+  val customCSRMods: Seq[CSRModule[_ <: CSRBundle]] = Seq(
     sbpctl,
     spfctl,
     slvpredctl,
@@ -56,6 +88,11 @@ trait CSRCustom { self: NewCSR =>
     srnctl,
     mcorepwr,
     mflushpwr,
+  ) ++ registerPressureCSRMods
+
+  require(
+    customCSRMods.map(_.addr).distinct.size == customCSRMods.size,
+    s"Custom CSR addresses must be unique: ${customCSRMods.map(csr => f"0x${csr.addr}%03x").mkString(", ")}",
   )
 
   val customCSRMap: SeqMap[Int, (CSRAddrWriteBundle[_ <: CSRBundle], UInt)] = SeqMap.from(
@@ -65,6 +102,18 @@ trait CSRCustom { self: NewCSR =>
   val customCSROutMap: SeqMap[Int, UInt] = SeqMap.from(
     customCSRMods.map(csr => (csr.addr -> csr.regOut.asInstanceOf[CSRBundle].asUInt)).iterator
   )
+}
+
+class RegisterPressureDataCSR(implicit p: Parameters) extends CSRModule(
+  "RegisterPressureData",
+  new CSRBundle {
+    val ALL = RO(63, 0)
+  },
+) {
+  val selectedData = IO(Input(UInt(64.W)))
+
+  regOut.ALL := 0.U
+  rdata := selectedData
 }
 
 class SbpctlBundle extends CSRBundle {
@@ -141,4 +190,3 @@ object SpfctlL1DPfActiveThreshold extends CSREnum with RWApply {
 object SlvpredCtlTimeOut extends CSREnum with RWApply {
   val initValue = Value(3.U)
 }
-

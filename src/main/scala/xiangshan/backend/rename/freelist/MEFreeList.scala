@@ -31,6 +31,8 @@ class MEFreeList(size: Int)(implicit p: Parameters) extends BaseFreeList(size) w
 
   val tailPtr = RegInit(FreeListPtr(false, size - 1))
 
+  io.currentFreeCount := distanceBetween(tailPtr, headPtr)
+
   val doWalkRename = io.walk && io.doAllocate && !io.redirect
   val doNormalRename = io.canAllocate && io.doAllocate && !io.redirect
   val doRename = doWalkRename || doNormalRename

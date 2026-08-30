@@ -76,6 +76,7 @@ class PerfCounterIO(implicit p: Parameters) extends XSBundle {
     val fpdqFull  = Bool()
     val lsdqFull  = Bool()
   }
+  val registerPressureData = if (EnableRegisterPressureMonitor) Some(UInt(64.W)) else None
   val memInfo = new Bundle {
     val sqFull = Bool()
     val lqFull = Bool()

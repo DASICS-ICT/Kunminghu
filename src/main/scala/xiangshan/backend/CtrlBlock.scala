@@ -32,7 +32,7 @@ import xiangshan.backend.dispatch.{CoreDispatchTopDownIO}
 import xiangshan.backend.dispatch.NewDispatch
 import xiangshan.backend.fu.vector.Bundles.{VType, Vl}
 import xiangshan.backend.fu.wrapper.CSRToDecode
-import xiangshan.backend.rename.{Rename, RenameTableWrapper, SnapshotGenerator}
+import xiangshan.backend.rename.{RegisterPressureCSR, Rename, RenameTableWrapper, SnapshotGenerator}
 import xiangshan.backend.rob.{Rob, RobCSRIO, RobCoreTopDownIO, RobDebugRollingIO, RobLsqIO, RobPtr}
 import xiangshan.frontend.{FtqPtr, FtqRead, Ftq_RF_Components}
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
@@ -638,6 +638,18 @@ class CtrlBlockImp(
   rename.io.redirect := s1_s3_redirect
   rename.io.rabCommits := rob.io.rabCommits
   rename.io.singleStep := GatedValidRegNext(io.csrCtrl.singlestep)
+  if (EnableRegisterPressureMonitor) {
+    val distributedWrite = io.csrCtrl.distribute_csr.w
+    val pressureIO = rename.io.registerPressure.get
+    pressureIO.csrWrite.valid := distributedWrite.valid && (
+      distributedWrite.bits.addr === RegisterPressureCSR.ControlAddress.U ||
+      distributedWrite.bits.addr === RegisterPressureCSR.IndexAddress.U
+    )
+    pressureIO.csrWrite.bits.addr := distributedWrite.bits.addr
+    pressureIO.csrWrite.bits.data := distributedWrite.bits.data
+    // User-only sampling targets host user mode and deliberately excludes guest user mode.
+    pressureIO.samplePrivilegeAllowed := io.fromCSR.traceCSR.currentPriv === Priv.HU
+  }
   rename.io.waittable := (memCtrl.io.waitTable2Rename zip decode.io.out).map{ case(waittable2rename, decodeOut) =>
     RegEnable(waittable2rename, decodeOut.fire)
   }
@@ -830,6 +842,9 @@ class CtrlBlockImp(
   io.perfInfo.ctrlInfo.intdqFull := false.B
   io.perfInfo.ctrlInfo.fpdqFull := false.B
   io.perfInfo.ctrlInfo.lsdqFull := false.B
+  if (EnableRegisterPressureMonitor) {
+    io.perfInfo.registerPressureData.get := rename.io.registerPressure.get.selectedData
+  }
 
   val perfEvents = Seq(decode, rename, dispatch, rob).flatMap(_.getPerfEvents)
   generatePerfEvent()
@@ -965,6 +980,7 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
       val fpdqFull  = Bool()
       val lsdqFull  = Bool()
     }
+    val registerPressureData = if (EnableRegisterPressureMonitor) Some(UInt(64.W)) else None
   })
   val diff_int_rat = if (params.basicDebugEn) Some(Vec(32, Output(UInt(PhyRegIdxWidth.W)))) else None
   val diff_fp_rat  = if (params.basicDebugEn) Some(Vec(32, Output(UInt(PhyRegIdxWidth.W)))) else None

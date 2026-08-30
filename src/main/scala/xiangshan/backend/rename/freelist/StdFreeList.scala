@@ -32,6 +32,8 @@ class StdFreeList(freeListSize: Int, numLogicRegs: Int, regType: RegType, realNu
   val tailPtr = Wire(new FreeListPtr) // this is the real tailPtr
   val tailPtrOHReg = RegInit(0.U(freeListSize.W))
 
+  io.currentFreeCount := distanceBetween(lastTailPtr, headPtr)
+
   //
   // free committed instructions' `old_pdest` reg
   //

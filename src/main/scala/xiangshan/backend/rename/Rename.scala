@@ -51,6 +51,11 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     val rabCommits = Input(new RabCommitIO)
     // from csr
     val singleStep = Input(Bool())
+    val registerPressure = if (EnableRegisterPressureMonitor) Some(new Bundle {
+      val csrWrite = Input(Valid(new RegisterPressureCSRWrite))
+      val samplePrivilegeAllowed = Input(Bool())
+      val selectedData = Output(UInt(64.W))
+    }) else None
     // from decode
     val in = Vec(RenameWidth, Flipped(DecoupledIO(new DecodedInst)))
     val fusionInfo = Vec(DecodeWidth - 1, Flipped(new FusionDecodeInfo))
@@ -702,6 +707,59 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   )) > 1.U)
   // other stall
   val otherStall = notRecStall && !intFlStall && !fpFlStall && !vecFlStall && !v0FlStall && !vlFlStall && !multiFlStall
+
+  if (EnableRegisterPressureMonitor) {
+    val capacities = Seq(IntPhyRegs, FpPhyRegs, VfPhyRegs, V0PhyRegs, VlPhyRegs)
+    val resetOccupancies = Seq(1, FpLogicRegs, VecLogicRegs, V0LogicRegs, VlLogicRegs)
+    val monitor = Module(new RegisterPressureMonitor(
+      capacities = capacities,
+      resetOccupancies = resetOccupancies,
+      histogramShifts = Seq(3, 3, 2, 0, 0),
+      commitWidth = RabCommitWidth,
+    ))
+
+    val currentOccupancy = VecInit(Seq(
+      IntPhyRegs.U(RegisterPressureCSR.OccupancyWidth.W) - intFreeList.io.currentFreeCount,
+      FpPhyRegs.U(RegisterPressureCSR.OccupancyWidth.W) - fpFreeList.io.currentFreeCount,
+      VfPhyRegs.U(RegisterPressureCSR.OccupancyWidth.W) - vecFreeList.io.currentFreeCount,
+      V0PhyRegs.U(RegisterPressureCSR.OccupancyWidth.W) - v0FreeList.io.currentFreeCount,
+      VlPhyRegs.U(RegisterPressureCSR.OccupancyWidth.W) - vlFreeList.io.currentFreeCount,
+    ))
+    monitor.io.currentOccupancy := currentOccupancy
+
+    val redirectDelay1 = RegNext(io.redirect.valid, false.B)
+    val redirectDelay2 = RegNext(redirectDelay1, false.B)
+    val monitorRecovery = recStall || redirectDelay1 || redirectDelay2
+    monitor.io.pressureStall := VecInit(Seq(
+      !monitorRecovery && !io.out.head.valid && inHeadValid && dispatchCanAcc && !intFreeList.io.canAllocate,
+      !monitorRecovery && !io.out.head.valid && inHeadValid && dispatchCanAcc && !fpFreeList.io.canAllocate,
+      !monitorRecovery && !io.out.head.valid && inHeadValid && dispatchCanAcc && !vecFreeList.io.canAllocate,
+      !monitorRecovery && !io.out.head.valid && inHeadValid && dispatchCanAcc && !v0FreeList.io.canAllocate,
+      !monitorRecovery && !io.out.head.valid && inHeadValid && dispatchCanAcc && !vlFreeList.io.canAllocate,
+    ))
+    monitor.io.samplePrivilegeAllowed := io.registerPressure.get.samplePrivilegeAllowed
+    monitor.io.redirect := io.redirect.valid
+    monitor.io.walk := io.rabCommits.isWalk
+    monitor.io.csrWrite := io.registerPressure.get.csrWrite
+    monitor.io.commits.zipWithIndex.foreach { case (commit, index) =>
+      val info = io.rabCommits.info(index)
+      commit.valid := io.rabCommits.isCommit && io.rabCommits.commitValid(index)
+      commit.logicalDestination := info.ldest
+      commit.integerWrite := info.rfWen
+      commit.floatingPointWrite := info.fpWen
+      commit.vectorWrite := info.vecWen
+      commit.vectorMaskWrite := info.v0Wen
+      commit.vectorLengthWrite := info.vlWen
+    }
+    io.registerPressure.get.selectedData := monitor.io.selectedData
+
+    val resetWasAsserted = RegNext(reset.asBool, true.B)
+    when(resetWasAsserted && !reset.asBool) {
+      currentOccupancy.zip(resetOccupancies).foreach { case (occupancy, expected) =>
+        assert(occupancy === expected.U)
+      }
+    }
+  }
 
   io.stallReason.in.backReason.valid := io.stallReason.out.backReason.valid || !io.in.head.ready
   io.stallReason.in.backReason.bits := Mux(io.stallReason.out.backReason.valid, io.stallReason.out.backReason.bits,

@@ -35,6 +35,8 @@ abstract class BaseFreeList(size: Int, numLogicRegs:Int = 32)(implicit p: Parame
     val allocatePhyReg = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
     val canAllocate = Output(Bool())
     val doAllocate = Input(Bool())
+    // Current allocator state; it intentionally excludes this cycle's predicted updates.
+    val currentFreeCount = Output(UInt(log2Ceil(size + 1).W))
 
     val freeReq = Input(Vec(RabCommitWidth, Bool()))
     val freePhyReg = Input(Vec(RabCommitWidth, UInt(PhyRegIdxWidth.W)))

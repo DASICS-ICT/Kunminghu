@@ -154,6 +154,7 @@ case class XSCoreParameters
   RabCommitWidth: Int = 6,
   MaxUopSize: Int = 65,
   EnableRenameSnapshot: Boolean = true,
+  EnableRegisterPressureMonitor: Boolean = false,
   RenameSnapshotNum: Int = 4,
   FtqSize: Int = 64,
   EnableLoadFastWakeUp: Boolean = true, // NOTE: not supported now, make it false
@@ -722,6 +723,7 @@ trait HasXSParameter {
   def RabCommitWidth = coreParams.RabCommitWidth
   def MaxUopSize = coreParams.MaxUopSize
   def EnableRenameSnapshot = coreParams.EnableRenameSnapshot
+  def EnableRegisterPressureMonitor = coreParams.EnableRegisterPressureMonitor
   def RenameSnapshotNum = coreParams.RenameSnapshotNum
   def FtqSize = coreParams.FtqSize
   def EnableLoadFastWakeUp = coreParams.EnableLoadFastWakeUp

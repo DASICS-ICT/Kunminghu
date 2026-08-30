@@ -1,6 +1,7 @@
 package xiangshan.backend.fu.NewCSR
 
 import freechips.rocketchip.rocket.CSRs
+import xiangshan.backend.rename.RegisterPressureCSR
 
 object CSROoORead {
   /**
@@ -23,6 +24,7 @@ object CSROoORead {
     CSRs.mireg,
     CSRs.sireg,
     CSRs.vsireg,
+    RegisterPressureCSR.DataAddress,
   )
   val blockBackwardInOrderCsrReadList = List(
     CSRs.mireg,

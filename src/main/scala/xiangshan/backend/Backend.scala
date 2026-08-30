@@ -617,6 +617,9 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   csrio.perf <> io.perf
   csrio.perf.retiredInstr <> ctrlBlock.io.robio.csr.perfinfo.retiredInstr
   csrio.perf.ctrlInfo <> ctrlBlock.io.perfInfo.ctrlInfo
+  if (EnableRegisterPressureMonitor) {
+    csrio.perf.registerPressureData.get := ctrlBlock.io.perfInfo.registerPressureData.get
+  }
   private val fenceio = intExuBlock.io.fenceio.get
   io.fenceio <> fenceio
 

@@ -524,6 +524,9 @@ class FpgaDefaultConfig(n: Int = 1) extends Config(
       AlwaysBasicDiff = false,
       AlwaysBasicDB = false
     )
+    case XSTileKey => up(XSTileKey).map(_.copy(
+      EnableRegisterPressureMonitor = true,
+    ))
     case SoCParamsKey => up(SoCParamsKey).copy(
       L3CacheParamsOpt = Some(up(SoCParamsKey).L3CacheParamsOpt.get.copy(
         sramClkDivBy2 = false,

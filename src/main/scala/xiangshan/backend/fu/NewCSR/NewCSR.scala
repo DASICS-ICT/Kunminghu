@@ -231,6 +231,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   val toAIA   = IO(Output(new CSRToAIABundle))
   val fromAIA = IO(Flipped(Output(new AIAToCSRBundle)))
 
+  registerPressureDataCSR.foreach(_.selectedData := io.perf.registerPressureData.get)
+
   dontTouch(toAIA)
   dontTouch(fromAIA)
   dontTouch(io.fromTop.clintTime)

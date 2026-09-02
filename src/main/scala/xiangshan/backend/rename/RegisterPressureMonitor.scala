@@ -289,20 +289,28 @@ class RegisterPressureMonitor(
     internalFloatingPointDestinationMask,
   )
 
-  private val globalData = MuxLookup(readIndex, 0.U(64.W))(Seq(
-    0x000.U -> AbiInfo.U(64.W),
-    0x001.U -> Cat(0.U(60.W), hasSamples, frozen, userOnly, active),
-    0x002.U -> sampleCycles,
-    0x003.U -> redirectCount,
-    0x004.U -> walkCycles,
-    0x005.U -> integerDestinationMask,
-    0x006.U -> floatingPointDestinationMask,
-    0x007.U -> vectorDestinationMask,
-    0x008.U -> internalDestinationMasks,
-    0x009.U -> capacityMetadata,
-    0x00a.U -> resetOccupancyMetadata,
-    0x00b.U -> histogramMetadata,
-  ))
+  private val globalDataTable = VecInit(Seq(
+    AbiInfo.U(64.W),
+    Cat(0.U(60.W), hasSamples, frozen, userOnly, active),
+    sampleCycles,
+    redirectCount,
+    walkCycles,
+    integerDestinationMask.pad(64),
+    floatingPointDestinationMask.pad(64),
+    vectorDestinationMask.pad(64),
+    internalDestinationMasks,
+    capacityMetadata.pad(64),
+    resetOccupancyMetadata.pad(64),
+    histogramMetadata.pad(64),
+  ) ++ Seq.fill(4)(0.U(64.W)))
+
+  // Keep the global decoder as an indexed table so FPGA synthesis cannot prune
+  // it while retaining only the independently indexed physical-pool decoder.
+  private val globalData = WireDefault(0.U(64.W))
+  when(!readIndex(ReadIndexWidth - 1, 4).orR) {
+    globalData := globalDataTable(readIndex(3, 0))
+  }
+  dontTouch(globalData)
 
   private val poolOffset = (readIndex - PoolBlockBase.U)(5, 0)
   private val poolNumber = ((readIndex - PoolBlockBase.U) >> log2Ceil(PoolBlockSize))(2, 0)

@@ -118,10 +118,39 @@ class RegisterPressureMonitorTest extends AnyFlatSpec with ChiselScalatestTester
 
   private def poolIndex(pool: Int, offset: Int): Int = poolBase(pool) + offset
 
+  private def pack(values: Seq[Int], width: Int): BigInt = {
+    values.zipWithIndex.map { case (value, index) => BigInt(value) << (index * width) }.sum
+  }
+
   behavior of "RegisterPressureMonitor"
 
   it should "serialize indexed data reads behind older CSR writes" in {
     assert(CSROoORead.waitForwardInOrderCsrReadList.contains(DataAddress))
+  }
+
+  it should "decode all global entries through the indexed table" in {
+    test(monitor) { dut =>
+      initialize(dut)
+
+      val expected = Seq(
+        AbiInfo,
+        BigInt(0),
+        BigInt(0),
+        BigInt(0),
+        BigInt(0),
+        BigInt(0),
+        BigInt(0),
+        BigInt(0),
+        BigInt(0),
+        pack(capacities, OccupancyWidth),
+        pack(resetOccupancies, OccupancyWidth),
+        BigInt(CounterWidth) << 20,
+      ) ++ Seq.fill(4)(BigInt(0))
+
+      expected.zipWithIndex.foreach { case (value, index) =>
+        expectSelected(dut, index, value)
+      }
+    }
   }
 
   it should "honor all and user-only control, freeze, clear, and repeated starts" in {
@@ -190,7 +219,10 @@ class RegisterPressureMonitorTest extends AnyFlatSpec with ChiselScalatestTester
       command(dut, Clear)
       expectSelected(dut, poolIndex(IntegerPool, 0x01), 0)
       expectSelected(dut, 0x00c, 0)
+      expectSelected(dut, 0x010, 0)
+      expectSelected(dut, 0x01f, 0)
       expectSelected(dut, poolIndex(IntegerPool, 0x0f), 0)
+      expectSelected(dut, 0x160, 0)
       expectSelected(dut, 0x1ff, 0)
     }
   }

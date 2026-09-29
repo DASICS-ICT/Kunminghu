@@ -82,6 +82,7 @@ class NewCSRInput(implicit p: Parameters) extends Bundle {
   val mret = Input(Bool())
   val sret = Input(Bool())
   val dret = Input(Bool())
+  val uret = Input(Bool())
   val redirectFlush = Input(Bool())
 }
 
@@ -92,6 +93,8 @@ class NewCSROutput(implicit p: Parameters) extends Bundle {
   val rData = UInt(64.W)
   val targetPcUpdate = Bool()
   val targetPc = new TargetPCBundle
+  val userReturnTarget = new TargetPCBundle
+  val userReturnRedirect = Bool()
   val regOut = UInt(64.W)
   // perf
   val isPerfCnt = Bool()
@@ -104,6 +107,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   with HypervisorLevel
   with VirtualSupervisorLevel
   with Unprivileged
+  with UserTimerCSRs
   with CSRAIA
   with HasExternalInterruptBundle
   with HasNonMaskableIRPBundle
@@ -117,6 +121,7 @@ class NewCSR(implicit val p: Parameters) extends Module
 {
 
   import CSRConfig._
+  import xiangshan.backend.fu.NewCSR.CSREvents.{HUEntryPort, HUEntryOutcome, InterruptDescriptor, InterruptEventIdentity, UserTrapEventInput, TrapEntryHUEventSink, UretEventSink}
 
   val io = IO(new Bundle {
     val fromTop = Input(new Bundle {
@@ -126,6 +131,10 @@ class NewCSR(implicit val p: Parameters) extends Module
       val criticalErrorState = Input(Bool())
     })
     val in = Flipped(DecoupledIO(new NewCSRInput))
+    val huEntry = Option.when(HasUserTimerInterrupt)(new HUEntryPort)
+    val interruptCandidate = Option.when(HasUserTimerInterrupt)(Output(Valid(new InterruptDescriptor)))
+    val huCandidateKill = Option.when(HasUserTimerInterrupt)(Output(Bool()))
+    val acceptedInterrupt = Option.when(HasUserTimerInterrupt)(Input(Valid(new InterruptEventIdentity)))
     val trapInst = Input(ValidIO(UInt(InstWidth.W)))
     val fromMem = Input(new Bundle {
       val excpVA  = UInt(XLEN.W)
@@ -146,6 +155,7 @@ class NewCSR(implicit val p: Parameters) extends Module
         val isHls = Bool()
         val isFetchMalAddr = Bool()
         val isForVSnonLeafPTE = Bool()
+        val interruptEvent = Option.when(HasUserTimerInterrupt)(new InterruptEventIdentity)
       })
       val commit = Input(new RobCommitCSR)
       val robDeqPtr = Input(new RobPtr)
@@ -160,6 +170,10 @@ class NewCSR(implicit val p: Parameters) extends Module
     /** Output should be a DecoupledIO, since now CSR writing to integer register file might be blocked (by arbiter) */
     val out = DecoupledIO(new NewCSROutput)
     val status = Output(new Bundle {
+      val userInHandler = Option.when(HasUserTimerInterrupt)(Bool())
+      val userEntryEffect = Option.when(HasUserTimerInterrupt)(Bool())
+      val userReturnEffect = Option.when(HasUserTimerInterrupt)(Bool())
+      val userTargetIdentity = Option.when(HasUserTimerInterrupt)(Valid(new InterruptEventIdentity))
       val privState = new PrivState
       val interrupt = Bool()
       val wfiEvent = Bool()
@@ -236,7 +250,32 @@ class NewCSR(implicit val p: Parameters) extends Module
   dontTouch(io.fromTop.clintTime)
 
   /* Alias of input valid/ready */
-  val valid = io.in.valid
+  // The HU slot excludes software execution, including legacy live-valid consumers.
+  private val huBusy = if (HasUserTimerInterrupt) Some(RegInit(false.B)) else None
+  // The reservation survives PC transport and terminal backpressure. Only the
+  // controller's release, after redirect ownership ends, reopens software issue.
+  private val huPcValid = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val huFinished = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val huCanceled = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val huDebugPending = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val huTrapFinished = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val huSaved = Option.when(HasUserTimerInterrupt)(Reg(new UserTrapEventInput))
+  private val huIdentity = Option.when(HasUserTimerInterrupt)(Reg(new InterruptEventIdentity))
+  private val huTrapTarget = Option.when(HasUserTimerInterrupt)(Reg(new TargetPCBundle))
+  // A critical error observed after a terminal effect needs a new precise ROB
+  // boundary; it must not reuse the completed HU transaction's recovery PC.
+  private val deferredCriticalDebug = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val criticalDebugInFlight = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val huEligible = WireDefault(false.B)
+  private val huCandidateInvalidate = WireDefault(false.B)
+  private val huClaim = WireDefault(false.B)
+  private val huTakeDebug = WireDefault(false.B)
+  private val huCancelNow = WireDefault(false.B)
+  private val userReturnPending = if (HasUserTimerInterrupt) Some(RegInit(false.B)) else None
+  private val userReturnLegal = if (HasUserTimerInterrupt) Some(RegInit(false.B)) else None
+  private val userEventCancel = WireDefault(false.B)
+  private val softwareSlotReady = Wire(Bool())
+  val valid = if (HasUserTimerInterrupt) io.in.valid && softwareSlotReady else io.in.valid
 
   /* Alias of input signals */
   val wen   = io.in.bits.wen && valid
@@ -249,7 +288,12 @@ class NewCSR(implicit val p: Parameters) extends Module
   // flush
   val redirectFlush = io.in.bits.redirectFlush
 
-  val hasTrap = io.fromRob.trap.valid
+  private val deliveredInterrupt = io.fromRob.trap.bits.interruptEvent.map(_.interrupt)
+  private val hasHURequest = io.fromRob.trap.valid && io.fromRob.trap.bits.isInterrupt &&
+    deliveredInterrupt.map(_.irToHU).getOrElse(false.B)
+  // An accepted HU descriptor owns a separate transaction and is never also an
+  // ordinary trap, even while its exact PC uses the common exception transport.
+  val hasTrap = io.fromRob.trap.valid && !hasHURequest
   val trapVec = io.fromRob.trap.bits.trapVec
   val trapPC = io.fromRob.trap.bits.pc
   val trapPCGPA = io.fromRob.trap.bits.pcGPA
@@ -289,6 +333,11 @@ class NewCSR(implicit val p: Parameters) extends Module
   private val (isModeHS, isModeHU) = (privState.isModeHS, privState.isModeHU)
   private val (isModeVS, isModeVU) = (privState.isModeVS, privState.isModeVU)
 
+  userTimer.foreach { timer =>
+    // Entry/return change eligibility only after their effect edge; masks do not freeze counting.
+    timer.io.tickEnable := isModeHU && !debugMode && !userInHandler.get
+  }
+
   val permitMod = Module(new CSRPermitModule)
   val sstcIRGen = Module(new SstcInterruptGen)
   val commidIdMod = Module(new CommitIDModule(40))
@@ -305,7 +354,12 @@ class NewCSR(implicit val p: Parameters) extends Module
   val legalMNret = permitMod.io.out.hasLegalMNret
   val legalDret  = permitMod.io.out.hasLegalDret
 
-  private val wenLegalReg = GatedValidRegNext(wenLegal)
+  private val userTimerAddressHit = if (HasUserTimerInterrupt) {
+    UserTimerCSRAddress.all.map(address => addr === address.U).reduce(_ || _)
+  } else false.B
+  // Bank requests have their own accepted write selection. Do not dispatch their delayed
+  // write pulse using a subsequent live address through any legacy CSR consumer.
+  private val wenLegalReg = GatedValidRegNext(wenLegal && !userTimerAddressHit)
 
   var csrRwMap: SeqMap[Int, (CSRAddrWriteBundle[_], UInt)] =
     machineLevelCSRMap ++
@@ -319,6 +373,10 @@ class NewCSR(implicit val p: Parameters) extends Module
     pmpCSRMap ++
     pmaCSRMap
 
+  require((csrRwMap.keySet intersect userTimerCSRMap.keySet).isEmpty,
+    "User timer CSR addresses overlap an implemented CSR")
+  csrRwMap ++= userTimerCSRMap
+
   val csrMods: Seq[CSRModule[_]] =
     machineLevelCSRMods ++
     supervisorLevelCSRMods ++
@@ -329,7 +387,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     aiaCSRMods ++
     customCSRMods ++
     pmpCSRMods ++
-    pmaCSRMods
+    pmaCSRMods ++
+    userTimerCSRMods
 
   var csrOutMap: SeqMap[Int, UInt] =
     machineLevelCSROutMap ++
@@ -343,16 +402,68 @@ class NewCSR(implicit val p: Parameters) extends Module
     pmpCSROutMap ++
     pmaCSROutMap
 
+  require((csrOutMap.keySet intersect userTimerCSROutMap.keySet).isEmpty,
+    "User timer CSR addresses overlap an implemented CSR readout")
+  csrOutMap ++= userTimerCSROutMap
+
   // interrupt
   val nmip = RegInit(new NonMaskableIRPendingBundle, (new NonMaskableIRPendingBundle).init)
-  when(nonMaskableIRP.NMI_43) {
-    nmip.NMI_43 := true.B
-  }
-  when(nonMaskableIRP.NMI_31) {
-    nmip.NMI_31 := true.B
+  private val nmiInFlight = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val nmiInFlightCause = Option.when(HasUserTimerInterrupt)(Reg(UInt(8.W)))
+  private val nmiClaim = WireDefault(false.B)
+  private val nmiClaimCause = WireDefault(0.U(8.W))
+  if (HasUserTimerInterrupt) {
+    val accepted = io.acceptedInterrupt.get
+    nmiClaim := accepted.valid && accepted.bits.interrupt.nmi && !accepted.bits.interrupt.debug &&
+      !accepted.bits.interrupt.irToHU
+    nmiClaimCause := accepted.bits.interrupt.cause
+    when(nmiClaim) {
+      nmiInFlight.get := true.B
+      nmiInFlightCause.get := nmiClaimCause
+    }.elsewhen(hasTrap && trapIsInterrupt && deliveredInterrupt.get.nmi &&
+      deliveredInterrupt.get.cause === nmiInFlightCause.get) {
+      nmiInFlight.get := false.B
+    }
+    // Pending belongs to the source until its accepted descriptor actually enters
+    // MN. A coincident new assertion remains pending after that acknowledgement.
+    val nmiEffect = trapEntryMNEvent.valid && hasTrap && trapIsInterrupt &&
+      deliveredInterrupt.get.nmi && !deliveredInterrupt.get.debug && !deliveredInterrupt.get.irToHU
+    when(nonMaskableIRP.NMI_43) {
+      nmip.NMI_43 := true.B
+    }.elsewhen(nmiEffect && deliveredInterrupt.get.cause === NonMaskableIRNO.NMI_43.U) {
+      nmip.NMI_43 := false.B
+    }
+    when(nonMaskableIRP.NMI_31) {
+      nmip.NMI_31 := true.B
+    }.elsewhen(nmiEffect && deliveredInterrupt.get.cause === NonMaskableIRNO.NMI_31.U) {
+      nmip.NMI_31 := false.B
+    }
+  } else {
+    when(nonMaskableIRP.NMI_43) { nmip.NMI_43 := true.B }
+    when(nonMaskableIRP.NMI_31) { nmip.NMI_31 := true.B }
   }
 
-  val intrMod = Module(new InterruptFilter)
+  val intrMod = Module(new InterruptFilter(HasUserTimerInterrupt))
+  if (HasUserTimerInterrupt) {
+    intrMod.io.in.huCandidate.get := huEligible
+    intrMod.io.in.huCandidateKill.get := huCandidateInvalidate
+    intrMod.io.in.huClaim.get := huClaim
+    intrMod.io.in.nmiInFlight.get.valid := nmiInFlight.get
+    intrMod.io.in.nmiInFlight.get.bits := nmiInFlightCause.get
+    intrMod.io.in.nmiClaim.get.valid := nmiClaim
+    intrMod.io.in.nmiClaim.get.bits := nmiClaimCause
+    intrMod.io.in.criticalDebug.get := deferredCriticalDebug.get
+    val criticalClaim = io.acceptedInterrupt.get.valid && io.acceptedInterrupt.get.bits.interrupt.criticalDebug
+    intrMod.io.in.criticalDebugInFlight.get := criticalDebugInFlight.get
+    intrMod.io.in.criticalDebugClaim.get := criticalClaim
+    when(criticalClaim) {
+      criticalDebugInFlight.get := true.B
+    }.elsewhen(hasTrap && trapIsInterrupt && deliveredInterrupt.get.criticalDebug) {
+      criticalDebugInFlight.get := false.B
+    }
+    io.interruptCandidate.get := intrMod.io.out.candidate.get
+    io.huCandidateKill.get := huCandidateInvalidate
+  }
   intrMod.io.in.privState := privState
   intrMod.io.in.mstatusMIE := mstatus.regOut.MIE.asBool
   intrMod.io.in.sstatusSIE := mstatus.regOut.SIE.asBool
@@ -377,26 +488,42 @@ class NewCSR(implicit val p: Parameters) extends Module
   intrMod.io.in.miprios := Cat(miregiprios.map(_.rdata).reverse)
   intrMod.io.in.hsiprios := Cat(siregiprios.map(_.rdata).reverse)
   intrMod.io.in.mnstatusNMIE := mnstatus.regOut.NMIE.asBool
-  intrMod.io.in.nmi := nmip.asUInt.orR
-  intrMod.io.in.nmiVec := nmip.asUInt
+  val selectableNmi = if (HasUserTimerInterrupt) {
+    nmip.asUInt & ~Mux(nmiInFlight.get, UIntToOH(nmiInFlightCause.get, 64), 0.U(64.W))
+  } else nmip.asUInt
+  intrMod.io.in.nmi := selectableNmi.orR
+  intrMod.io.in.nmiVec := selectableNmi
   intrMod.io.in.debugMode := debugMode
-  intrMod.io.in.debugIntr := debugIntr
+  intrMod.io.in.debugIntr := debugIntr || (deferredCriticalDebug.getOrElse(false.B) &&
+    !criticalDebugInFlight.getOrElse(false.B) && criticalErrorState && dcsr.regOut.CETRIG.asBool)
   intrMod.io.in.dcsr      := dcsr.regOut
   intrMod.io.in.platform.meip := platformIRP.MEIP
   intrMod.io.in.platform.seip := platformIRP.SEIP
   intrMod.io.in.fromAIA.meip := fromAIA.meip
   intrMod.io.in.fromAIA.seip := fromAIA.seip
 
-  when(intrMod.io.out.nmi && intrMod.io.out.interruptVec.valid) {
-    nmip.NMI_31 := nmip.NMI_31 & !UIntToOH(intrMod.io.out.interruptVec.bits, 64)(NonMaskableIRNO.NMI_31)
-    nmip.NMI_43 := nmip.NMI_43 & !UIntToOH(intrMod.io.out.interruptVec.bits, 64)(NonMaskableIRNO.NMI_43)
+  if (!HasUserTimerInterrupt) {
+    when(intrMod.io.out.nmi && intrMod.io.out.interruptVec.valid) {
+      nmip.NMI_31 := nmip.NMI_31 & !UIntToOH(intrMod.io.out.interruptVec.bits, 64)(NonMaskableIRNO.NMI_31)
+      nmip.NMI_43 := nmip.NMI_43 & !UIntToOH(intrMod.io.out.interruptVec.bits, 64)(NonMaskableIRNO.NMI_43)
+    }
   }
-  val intrVec = RegEnable(intrMod.io.out.interruptVec.bits, 0.U, intrMod.io.out.interruptVec.valid)
-  val debug = RegEnable(intrMod.io.out.debug, false.B, intrMod.io.out.interruptVec.valid)
-  val nmi = RegEnable(intrMod.io.out.nmi, false.B, intrMod.io.out.interruptVec.valid)
-  val virtualInterruptIsHvictlInject = RegEnable(intrMod.io.out.virtualInterruptIsHvictlInject, false.B, intrMod.io.out.interruptVec.valid)
-  val irToHS = RegEnable(intrMod.io.out.irToHS, false.B, intrMod.io.out.interruptVec.valid)
-  val irToVS = RegEnable(intrMod.io.out.irToVS, false.B, intrMod.io.out.interruptVec.valid)
+  val legacyCapture = intrMod.io.out.interruptVec.valid &&
+    !intrMod.io.out.candidate.map(_.bits.irToHU).getOrElse(false.B)
+  val observedIntrVec = RegEnable(intrMod.io.out.interruptVec.bits, 0.U, legacyCapture)
+  val observedDebug = RegEnable(intrMod.io.out.debug, false.B, legacyCapture)
+  val observedNmi = RegEnable(intrMod.io.out.nmi, false.B, legacyCapture)
+  val observedInject = RegEnable(intrMod.io.out.virtualInterruptIsHvictlInject, false.B, legacyCapture)
+  val observedToHS = RegEnable(intrMod.io.out.irToHS, false.B, legacyCapture)
+  val observedToVS = RegEnable(intrMod.io.out.irToVS, false.B, legacyCapture)
+  val useAcceptedInterrupt = HasUserTimerInterrupt.B && hasTrap && trapIsInterrupt
+  val intrVec = if (HasUserTimerInterrupt) Mux(useAcceptedInterrupt, deliveredInterrupt.get.cause, 0.U) else observedIntrVec
+  val debug = if (HasUserTimerInterrupt) useAcceptedInterrupt && deliveredInterrupt.get.debug else observedDebug
+  val nmi = if (HasUserTimerInterrupt) useAcceptedInterrupt && deliveredInterrupt.get.nmi else observedNmi
+  val virtualInterruptIsHvictlInject = Mux(useAcceptedInterrupt,
+    deliveredInterrupt.map(_.virtualInterruptIsHvictlInject).getOrElse(false.B), if (HasUserTimerInterrupt) false.B else observedInject)
+  val irToHS = Mux(useAcceptedInterrupt, deliveredInterrupt.map(_.irToHS).getOrElse(false.B), if (HasUserTimerInterrupt) false.B else observedToHS)
+  val irToVS = Mux(useAcceptedInterrupt, deliveredInterrupt.map(_.irToVS).getOrElse(false.B), if (HasUserTimerInterrupt) false.B else observedToVS)
 
   val trapHandleMod = Module(new TrapHandleModule)
 
@@ -447,7 +574,13 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   // Todo: all wen and wdata of CSRModule assigned in this for loop
   for ((id, (wBundle, _)) <- csrRwMap) {
-    if (vsMapS.contains(id)) {
+    if (HasUserTimerInterrupt && UserTimerCSRAddress.all.contains(id)) {
+      // The wrapper captures final RMW data on fire. Keep this address selection aligned
+      // with that data for the following write edge, including bubbles and output stalls.
+      val acceptedWrite = RegNext(io.in.fire && wenLegal && addr === id.U && !redirectFlush, false.B)
+      wBundle.wen := acceptedWrite && !redirectFlush
+      wBundle.wdata := wdata
+    } else if (vsMapS.contains(id)) {
       // VS access CSR by S: privState.isModeVS && addrMappedToVS === sMapVS(id).U
       wBundle.wen := wenLegalReg && ((isModeVS && addr === vsMapS(id).U) || (!isModeVS && addr === id.U))
       wBundle.wdata := wdata
@@ -469,6 +602,9 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   permitMod.io.in.privState := privState
   permitMod.io.in.debugMode := debugMode
+  permitMod.io.in.userHandler := userInHandler.getOrElse(false.B)
+  permitMod.io.in.userTimerEnabled := HasUserTimerInterrupt.B
+  permitMod.io.in.xRet.uret := io.in.bits.uret && valid
 
   permitMod.io.in.xRet.mnret := io.in.bits.mnret && valid
   permitMod.io.in.xRet.mret  := io.in.bits.mret  && valid
@@ -601,6 +737,14 @@ class NewCSR(implicit val p: Parameters) extends Module
         m.writeFCSR         := writeFpLegal
         m.writeVCSR         := writeVecLegal
         m.isVirtMode        := V.asUInt.asBool
+      case _ =>
+    }
+    mod match {
+      case m: TrapEntryHUEventSink => m.trapToHU := trapEntryHUEvent.get.out
+      case _ =>
+    }
+    mod match {
+      case m: UretEventSink => m.retFromU := uretEvent.get.out
       case _ =>
     }
     mod match {
@@ -830,7 +974,8 @@ class NewCSR(implicit val p: Parameters) extends Module
         in.memExceptionIsForVSnonLeafPTE := io.fromMem.excpIsForVSnonLeafPTE
 
         in.virtualInterruptIsHvictlInject := virtualInterruptIsHvictlInject
-        in.hvictlIID := hvictl.regOut.IID.asUInt
+        in.hvictlIID := Mux(useAcceptedInterrupt,
+          deliveredInterrupt.map(_.hvictlIID).getOrElse(0.U), hvictl.regOut.IID.asUInt)
     }
   }
 
@@ -1004,7 +1149,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   })
 
   private val needTargetUpdate = mnretEvent.out.targetPc.valid || mretEvent.out.targetPc.valid || sretEvent.out.targetPc.valid || dretEvent.out.targetPc.valid ||
-    trapEntryMEvent.out.targetPc.valid || trapEntryMNEvent.out.targetPc.valid || trapEntryHSEvent.out.targetPc.valid || trapEntryVSEvent.out.targetPc.valid || trapEntryDEvent.out.targetPc.valid
+    trapEntryMEvent.out.targetPc.valid || trapEntryMNEvent.out.targetPc.valid || trapEntryHSEvent.out.targetPc.valid || trapEntryVSEvent.out.targetPc.valid || trapEntryDEvent.out.targetPc.valid ||
+    userEntryEffect || userReturnEffect
 
   private val noCSRIllegal = (ren || wen) && Cat(csrRwMap.keys.toSeq.sorted.map(csrAddr => !(addr === csrAddr.U))).andR
 
@@ -1064,7 +1210,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   private val imsic_EX_VI = imsicIllegal && V.asUInt.asBool
 
   /** Set io.in.ready when state machine is ready to receive a new request synchronously */
-  io.in.ready := (state === s_idle)
+  softwareSlotReady := state === s_idle && !huBusy.getOrElse(false.B)
+  io.in.ready := softwareSlotReady
 
   /**
    * Valid signal of newCSR output.
@@ -1076,7 +1223,123 @@ class NewCSR(implicit val p: Parameters) extends Module
   val normalCSRValid = state === s_idle && valid && !asyncAccess
   val waitIMSICValid = state === s_waitIMSIC && fromAIA.rdata.valid
 
-  io.out.valid := (waitIMSICValid || state === s_finish) && !redirectFlush
+  io.out.valid := (waitIMSICValid || state === s_finish) && !redirectFlush && !userEventCancel
+  io.out.bits.userReturnTarget := 0.U.asTypeOf(new TargetPCBundle)
+  io.out.bits.userReturnRedirect := false.B
+
+  if (HasUserTimerInterrupt) {
+    val port = io.huEntry.get
+    val hu = trapEntryHUEvent.get
+    val ret = uretEvent.get
+    val retSaved = Reg(new UserTrapEventInput)
+    hu.in := huSaved.get
+    ret.in := retSaved
+    val higherEvent = hasTrap || entryDebugMode || dbltrpToMN
+    userEventCancel := userReturnPending.get && (higherEvent || reset.asBool)
+    val status = userTimerCSROutMap(UserTimerCSRAddress.ustatus)
+    huEligible := isModeHU && !debugMode && !userInHandler.get &&
+      userTimer.get.io.pending && status(0) && userTimerCSROutMap(UserTimerCSRAddress.uie)(4) &&
+      mstateen0.regOut.C.asBool && sstateen0.rdataFields.C.asBool &&
+      !dcsr.regOut.STEP.asBool && mnstatus.regOut.NMIE.asBool
+
+    val qualificationAddresses = Seq(UserTimerCSRAddress.utimer, UserTimerCSRAddress.ustatus,
+      UserTimerCSRAddress.uie, CSRs.mstateen0, CSRs.sstateen0, CSRs.dcsr, CSRs.mnstatus)
+    val qualificationWriteC0 = io.in.fire && wenLegal && !redirectFlush &&
+      qualificationAddresses.map(address => addr === address.U).reduce(_ || _)
+    val qualificationWriteC1 = qualificationAddresses.map(address => csrRwMap(address)._1.wen).reduce(_ || _)
+    huCandidateInvalidate := !huEligible || qualificationWriteC0 || qualificationWriteC1 ||
+      huBusy.get || higherEvent || intrMod.io.out.higherPriority.get || reset.asBool
+    val sameRequest = port.request.bits.event.asUInt === huIdentity.get.asUInt
+    huCancelNow := port.cancel.valid && huBusy.get && !huFinished.get && !huTrapFinished.get &&
+      port.cancel.bits.event.asUInt === huIdentity.get.asUInt
+    val replay = huCanceled.get || huCancelNow
+
+    port.reserve.ready := softwareSlotReady && !io.in.valid && !huCandidateInvalidate && !port.cancel.valid
+    huClaim := port.reserve.fire
+    // Once reserved, PC arrival no longer depends on live pending, masks, mode,
+    // or a cancellation. Replay and critical debug both still need that exact PC.
+    port.request.ready := huBusy.get && !huPcValid.get && !huFinished.get && sameRequest && !reset.asBool
+    port.satpMode := Mux(huBusy.get, huSaved.get.satp.MODE.asUInt, satp.regOut.MODE.asUInt)
+    port.completion.valid := huBusy.get && huPcValid.get && !huFinished.get && !higherEvent && !reset.asBool &&
+      (!huDebugPending.get || huTrapFinished.get || replay)
+    port.completion.bits.event := huIdentity.get
+    port.completion.bits.outcome := Mux(huTrapFinished.get, HUEntryOutcome.trap,
+      Mux(replay, HUEntryOutcome.replay, HUEntryOutcome.enter))
+    val replayTarget = WireDefault(0.U.asTypeOf(new TargetPCBundle))
+    replayTarget.pc := huSaved.get.pc
+    port.completion.bits.target := Mux(huTrapFinished.get, huTrapTarget.get,
+      Mux(replay, replayTarget, hu.out.targetPc.bits))
+    port.canceled := huBusy.get && !huFinished.get && !huTrapFinished.get &&
+      (replay || higherEvent || huDebugPending.get || reset.asBool)
+    port.effectLocked := huTrapFinished.get || huFinished.get
+    userEntryEffect := port.completion.fire && port.completion.bits.outcome === HUEntryOutcome.enter
+    hu.valid := userEntryEffect
+
+    when(port.reserve.fire) {
+      huBusy.get := true.B
+      huIdentity.get := port.reserve.bits
+      huSaved.get.target := userTimerCSROutMap(UserTimerCSRAddress.utvec)
+      huSaved.get.savedEnable := status(0)
+      huSaved.get.satp := satp.regOut
+      huPcValid.get := false.B
+      huFinished.get := false.B
+      huCanceled.get := false.B
+      huDebugPending.get := false.B
+      huTrapFinished.get := false.B
+    }
+    when(port.request.fire) {
+      huPcValid.get := true.B
+      huSaved.get.pc := port.request.bits.pc
+    }
+    when(huBusy.get && !huFinished.get) {
+      when(huCancelNow || hasTrap) { huCanceled.get := true.B }
+      when(criticalErrorState && dcsr.regOut.CETRIG.asBool && !debugMode) {
+        huDebugPending.get := true.B
+      }
+      when(needTargetUpdate && higherEvent && !userEntryEffect && !userReturnEffect) {
+        huTrapTarget.get := io.out.bits.targetPc
+        huTrapFinished.get := true.B
+      }
+    }
+    when(port.completion.fire) { huFinished.get := true.B }
+    when(port.release) {
+      assert(huBusy.get && (huFinished.get || port.completion.fire))
+      huBusy.get := false.B
+      huPcValid.get := false.B
+      huFinished.get := false.B
+      huCanceled.get := false.B
+      huDebugPending.get := false.B
+      huTrapFinished.get := false.B
+    }
+    when(port.reserve.fire) {
+      assert(port.reserve.bits.interrupt.irToHU && port.reserve.bits.interrupt.isInterrupt &&
+        port.reserve.bits.interrupt.cause === 4.U)
+    }
+    when(port.request.valid && huBusy.get) { assert(sameRequest) }
+    when(userEntryEffect) { assert(huPcValid.get && !huCanceled.get && !huTrapFinished.get) }
+
+    when(io.in.fire) {
+      userReturnPending.get := io.in.bits.uret && !redirectFlush && !higherEvent
+      userReturnLegal.get := permitMod.io.out.hasLegalUret
+      retSaved.pc := 0.U
+      retSaved.target := userTimerCSROutMap(UserTimerCSRAddress.uepc)
+      retSaved.savedEnable := status(4)
+      retSaved.satp := satp.regOut
+    }.elsewhen(io.out.fire || redirectFlush || userEventCancel) {
+      userReturnPending.get := false.B
+    }
+    when(userEventCancel || (valid && io.in.bits.uret && higherEvent)) {
+      stateNext := s_idle
+    }
+    userReturnEffect := io.out.fire && userReturnPending.get && userReturnLegal.get
+    ret.valid := userReturnEffect
+    io.out.bits.userReturnTarget := ret.out.targetPc.bits
+    io.out.bits.userReturnRedirect := userReturnPending.get && userReturnLegal.get && !userEventCancel && !redirectFlush
+    assert(!(userEntryEffect && userReturnEffect))
+    when(userEntryEffect || userReturnEffect) {
+      assert(!higherEvent && !userTimerCSRMap.values.map(_._1.wen).reduce(_ || _))
+    }
+  }
   io.out.bits.EX_II := DataHoldBypass(Mux1H(Seq(
     normalCSRValid -> (permitMod.io.out.EX_II || noCSRIllegal),
     waitIMSICValid -> imsic_EX_II,
@@ -1105,13 +1368,22 @@ class NewCSR(implicit val p: Parameters) extends Module
         trapEntryMEvent.out.targetPc.valid -> trapEntryMEvent.out.targetPc.bits,
         trapEntryMNEvent.out.targetPc.valid -> trapEntryMNEvent.out.targetPc.bits,
         trapEntryHSEvent.out.targetPc.valid -> trapEntryHSEvent.out.targetPc.bits,
-        trapEntryVSEvent.out.targetPc.valid -> trapEntryVSEvent.out.targetPc.bits)
+        trapEntryVSEvent.out.targetPc.valid -> trapEntryVSEvent.out.targetPc.bits) ++
+        trapEntryHUEvent.toSeq.map(e => e.out.targetPc.valid -> e.out.targetPc.bits) ++
+        uretEvent.toSeq.map(e => e.out.targetPc.valid -> e.out.targetPc.bits)
       )
     ),
   needTargetUpdate)
   io.out.bits.targetPcUpdate := needTargetUpdate
   io.out.bits.isPerfCnt := DataHoldBypass(addrInPerfCnt, false.B, io.in.fire)
 
+  io.status.userInHandler.foreach(_ := userInHandler.get)
+  io.status.userEntryEffect.foreach(_ := userEntryEffect)
+  io.status.userReturnEffect.foreach(_ := userReturnEffect)
+  io.status.userTargetIdentity.foreach { identity =>
+    identity.valid := userEntryEffect || huTakeDebug
+    identity.bits := huIdentity.get
+  }
   io.status.privState := privState
   io.status.fpState.frm := fcsr.frm
   io.status.fpState.off := mstatus.regOut.FS === ContextStatus.Off
@@ -1154,7 +1426,10 @@ class NewCSR(implicit val p: Parameters) extends Module
   debugMod.io.in.trapInfo.bits.isInterrupt := trapIsInterrupt
   debugMod.io.in.trapInfo.bits.trigger     := trigger
   debugMod.io.in.trapInfo.bits.singleStep  := singleStep
-  debugMod.io.in.trapInfo.bits.criticalErrorState := criticalErrorState
+  val acceptedCriticalDebug = useAcceptedInterrupt &&
+    deliveredInterrupt.map(_.criticalDebug).getOrElse(false.B)
+  debugMod.io.in.trapInfo.bits.criticalErrorState := criticalErrorState &&
+    (!deferredCriticalDebug.getOrElse(false.B) || acceptedCriticalDebug)
   debugMod.io.in.privState                 := privState
   debugMod.io.in.debugMode                 := debugMode
   debugMod.io.in.dcsr                      := dcsr.regOut
@@ -1167,17 +1442,35 @@ class NewCSR(implicit val p: Parameters) extends Module
   debugMod.io.in.tdata1Wdata               := wdata
   debugMod.io.in.triggerCanRaiseBpExp      := triggerCanRaiseBpExp
 
-  entryDebugMode := debugMod.io.out.hasDebugTrap && !debugMode
+  if (HasUserTimerInterrupt) {
+    when(huBusy.get && (huFinished.get || huTrapFinished.get) &&
+      criticalErrorState && dcsr.regOut.CETRIG.asBool && !debugMode) {
+      deferredCriticalDebug.get := true.B
+    }.elsewhen(entryDebugMode && acceptedCriticalDebug) {
+      deferredCriticalDebug.get := false.B
+    }
+    huTakeDebug := huBusy.get && !huFinished.get && huPcValid.get && !huTrapFinished.get &&
+      !huCanceled.get && !huCancelNow && !hasTrap &&
+      (huDebugPending.get || debugMod.io.out.criticalErrorStateEnterDebug) && !debugMode
+    // Critical debug takes ownership immediately, but its architectural entry waits
+    // for the reserved instruction's real PC. Other accepted traps keep their PC.
+    entryDebugMode := !debugMode && Mux(huBusy.get && !hasTrap, huTakeDebug, debugMod.io.out.hasDebugTrap)
+    when(huTakeDebug) {
+      trapEntryDEvent.in.trapPc := huSaved.get.pc
+    }
+  } else {
+    entryDebugMode := debugMod.io.out.hasDebugTrap && !debugMode
+  }
 
   trapEntryDEvent.valid                           := entryDebugMode
-  trapEntryDEvent.in.hasDebugIntr                 := debugMod.io.out.hasDebugIntr
+  trapEntryDEvent.in.hasDebugIntr                 := debugMod.io.out.hasDebugIntr && !acceptedCriticalDebug
   trapEntryDEvent.in.debugMode                    := debugMode
   trapEntryDEvent.in.hasTrap                      := hasTrap
   trapEntryDEvent.in.hasSingleStep                := debugMod.io.out.hasSingleStep
   trapEntryDEvent.in.triggerEnterDebugMode        := debugMod.io.out.triggerEnterDebugMode
   trapEntryDEvent.in.hasDebugEbreakException      := debugMod.io.out.hasDebugEbreakException
   trapEntryDEvent.in.breakPoint                   := debugMod.io.out.breakPoint
-  trapEntryDEvent.in.criticalErrorStateEnterDebug := debugMod.io.out.criticalErrorStateEnterDebug
+  trapEntryDEvent.in.criticalErrorStateEnterDebug := debugMod.io.out.criticalErrorStateEnterDebug || acceptedCriticalDebug
 
   for(idx <- 0 until TriggerNum) {
     val tdata1Pre = Wire(new Tdata1Bundle)
@@ -1217,20 +1510,24 @@ class NewCSR(implicit val p: Parameters) extends Module
       Seq(Priv.M,            Priv.HS,            Priv.VS,            Priv.HU,            Priv.VU)
     )
   )
-  val xret = legalDret || legalMNret || legalMret || legalSret
+  val xret = legalDret || legalMNret || legalMret || legalSret || userReturnEffect
   val currentPriv = privForTrace
-  val lastPriv = RegEnable(privForTrace, Priv.M, (xret || io.fromRob.trap.valid))
+  val lastPriv = RegEnable(privForTrace, Priv.M, (xret || hasTrap || userEntryEffect || huTakeDebug))
 
   io.status.traceCSR.lastPriv       := lastPriv
   io.status.traceCSR.currentPriv    := privForTrace
-  io.status.traceCSR.cause := Mux1H(
-    Seq(privState.isModeM, privState.isModeHS, privState.isModeVS),
-    Seq(mcause.rdata,      scause.rdata,       vscause.rdata)
-  )
-  io.status.traceCSR.tval  := Mux1H(
-    Seq(privState.isModeM, privState.isModeHS, privState.isModeVS),
-    Seq(mtval.rdata,       stval.rdata,        vstval.rdata)
-  )
+  val traceCause = Mux1H(Seq(
+    privState.isModeM -> mcause.rdata,
+    privState.isModeHS -> scause.rdata,
+    privState.isModeVS -> vscause.rdata) ++
+    userTimerCSROutMap.get(UserTimerCSRAddress.ucause).toSeq.map(data => isModeHU -> data))
+  val traceTval = Mux1H(Seq(
+    privState.isModeM -> mtval.rdata,
+    privState.isModeHS -> stval.rdata,
+    privState.isModeVS -> vstval.rdata) ++
+    userTimerCSROutMap.get(UserTimerCSRAddress.utval).toSeq.map(data => isModeHU -> data))
+  io.status.traceCSR.cause := Mux(userEntryEffect, "h8000000000000004".U, traceCause)
+  io.status.traceCSR.tval := Mux(userEntryEffect, 0.U, traceTval)
   
   /**
    * perf_begin
@@ -1347,7 +1644,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.status.instrAddrTransType.sv48x4 := privState.isVirtual && vsatp.regOut.MODE === SatpMode.Bare && hgatp.regOut.MODE === HgatpMode.Sv48x4
   assert(PopCount(io.status.instrAddrTransType.asUInt) === 1.U, "Exactly one inst trans type should be asserted")
 
-  private val csrAccess = wenLegalReg || RegNext(ren)
+  // A bank read must not become an indirect AIA request when the live address changes.
+  private val csrAccess = wenLegalReg || RegNext(ren && !userTimerAddressHit)
 
   private val imsicAddrValid =
     csrAccess &&  addr === CSRs.mireg.U &&  miselect.inIMSICRange ||
@@ -1474,8 +1772,9 @@ class NewCSR(implicit val p: Parameters) extends Module
   // Always instantiate basic difftest modules.
   if (env.AlwaysBasicDiff || env.EnableDifftest) {
     // Delay trap passed to difftest until VecExcpMod is not busy
+    val architecturalTrap = hasTrap || userEntryEffect
     val pendingTrap = RegInit(false.B)
-    when (hasTrap) {
+    when (architecturalTrap) {
       pendingTrap := true.B
     }.elsewhen (!io.fromVecExcpMod.busy) {
       pendingTrap := false.B
@@ -1483,8 +1782,11 @@ class NewCSR(implicit val p: Parameters) extends Module
 
     val hartId = io.fromTop.hartId
     val trapValid = pendingTrap && !io.fromVecExcpMod.busy
-    val trapNO = Mux(virtualInterruptIsHvictlInject && hasTrap, hvictl.regOut.IID.asUInt, trapHandleMod.io.out.causeNO.ExceptionCode.asUInt)
-    val interrupt = trapHandleMod.io.out.causeNO.Interrupt.asBool
+    val acceptedHvictlIID = Mux(useAcceptedInterrupt,
+      deliveredInterrupt.map(_.hvictlIID).getOrElse(0.U), hvictl.regOut.IID.asUInt)
+    val trapNO = Mux(userEntryEffect, 4.U, Mux(virtualInterruptIsHvictlInject && hasTrap,
+      acceptedHvictlIID, trapHandleMod.io.out.causeNO.ExceptionCode.asUInt))
+    val interrupt = userEntryEffect || trapHandleMod.io.out.causeNO.Interrupt.asBool
     val hasNMI = nmi && hasTrap
     val interruptNO = Mux(interrupt, trapNO, 0.U)
     val exceptionNO = Mux(!interrupt, trapNO, 0.U)
@@ -1499,24 +1801,36 @@ class NewCSR(implicit val p: Parameters) extends Module
     val sv48PC = SignExt(trapPC.take(48), XLEN)
     val barePC = ZeroExt(trapPC.take(PAddrBits), XLEN)
     // When enable virtual memory, the higher bit should fill with the msb of address of Sv39/Sv48/Sv57
-    val exceptionPC = Mux1H(Seq(
+    val regularExceptionPC = Mux1H(Seq(
       isSv39 -> sv39PC,
       isSv48 -> sv48PC,
       isBare -> barePC,
     ))
+    val exceptionPC = Mux(userEntryEffect, huSaved.map(_.pc).getOrElse(0.U), regularExceptionPC)
 
     val diffArchEvent = DifftestModule(new DiffArchEvent, delay = 3, dontCare = true)
     diffArchEvent.coreid := hartId
     diffArchEvent.valid := trapValid
-    diffArchEvent.interrupt := RegEnable(interruptNO, hasTrap)
-    diffArchEvent.exception := RegEnable(exceptionNO, hasTrap)
-    diffArchEvent.exceptionPC := RegEnable(exceptionPC, hasTrap)
-    diffArchEvent.hasNMI := RegEnable(hasNMI, hasTrap)
+    diffArchEvent.interrupt := RegEnable(interruptNO, architecturalTrap)
+    diffArchEvent.exception := RegEnable(exceptionNO, architecturalTrap)
+    diffArchEvent.exceptionPC := RegEnable(exceptionPC, architecturalTrap)
+    diffArchEvent.hasNMI := RegEnable(hasNMI, architecturalTrap)
     diffArchEvent.virtualInterruptIsHvictlInject := RegNext(virtualInterruptIsHvictlInject && hasTrap)
-    diffArchEvent.irToHS := RegEnable(irToHS, hasTrap)
-    diffArchEvent.irToVS := RegEnable(irToVS, hasTrap)
+    diffArchEvent.irToHS := RegEnable(irToHS, architecturalTrap)
+    diffArchEvent.irToVS := RegEnable(irToVS, architecturalTrap)
+    // The simulation sequence pairs each delivered trap with its post-effect snapshot.
+    // Production configurations retain constants and no additional event counter.
+    if (env.EnableDifftest && !env.FPGAPlatform) {
+      val eventSequence = RegInit(0.U(64.W))
+      when(architecturalTrap) { eventSequence := eventSequence + 1.U }
+      diffArchEvent.irToHU := RegEnable(userEntryEffect, false.B, architecturalTrap)
+      diffArchEvent.eventSeq := RegEnable(eventSequence + 1.U, 0.U(64.W), architecturalTrap)
+    } else {
+      diffArchEvent.irToHU := false.B
+      diffArchEvent.eventSeq := 0.U
+    }
     if (env.EnableDifftest) {
-      diffArchEvent.exceptionInst := RegEnable(io.fromRob.trap.bits.instr, hasTrap)
+      diffArchEvent.exceptionInst := RegEnable(Mux(userEntryEffect, 0.U, io.fromRob.trap.bits.instr), architecturalTrap)
     }
 
     val diffCriticalErrorEvent = DifftestModule(new DiffCriticalErrorEvent, delay = 4, dontCare = true)

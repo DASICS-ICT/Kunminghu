@@ -22,6 +22,7 @@ class TraceIO(implicit val p: Parameters) extends Bundle with HasXSParameter {
     val toPcMem        = new TraceBundle(hasIaddr = false, TraceGroupNum, IretireWidthCompressed)
     val toEncoder      = new TraceBundle(hasIaddr = false,  TraceGroupNum, IretireWidthCompressed)
     val blockRobCommit = Output(Bool())
+    val blockRobCommitNext = Option.when(HasUserTimerInterrupt)(Output(Bool()))
   }
 }
 
@@ -54,6 +55,7 @@ class Trace(implicit val p: Parameters) extends Module with HasXSParameter {
   traceBuffer.io.in.fromRob := s2_in
   val s2_out_groups = traceBuffer.io.out.groups
   blockCommit := traceBuffer.io.out.blockCommit
+  io.out.blockRobCommitNext.foreach(_ := traceBuffer.io.out.blockCommitNext.get)
 
   /**
    * stage 3: groups with iaddr from pcMem(ftqidx & ftqOffset -> iaddr) -> encoder

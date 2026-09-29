@@ -31,6 +31,7 @@ import xiangshan.DebugOptionsKey
 import system.SoCParamsKey
 
 class SimTop(implicit p: Parameters) extends Module {
+  protected def addDifftestObservations(): Unit = ()
   val debugOpts = p(DebugOptionsKey)
 
   val l_soc = LazyModule(new XSTop())
@@ -88,6 +89,7 @@ class SimTop(implicit p: Parameters) extends Module {
   soc.io.systemjtag.part_number := 0.U(16.W)
   soc.io.systemjtag.version := 0.U(4.W)
 
+  addDifftestObservations()
   val difftest = DifftestModule.finish("XiangShan")
 
   simMMIO.io.uart <> difftest.uart

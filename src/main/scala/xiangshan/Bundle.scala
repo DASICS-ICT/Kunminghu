@@ -301,6 +301,8 @@ class MicroOpRbExt(implicit p: Parameters) extends XSBundleWithMicroOp {
 }
 
 class Redirect(implicit p: Parameters) extends XSBundle {
+  // Only the originating HU flush carries this provenance; age still uses ROB/FTQ identity.
+  val isHUTimer = Option.when(HasUserTimerInterrupt)(Bool())
   val isRVC = Bool()
   val robIdx = new RobPtr
   val ftqIdx = new FtqPtr

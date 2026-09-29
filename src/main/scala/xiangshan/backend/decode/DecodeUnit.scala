@@ -802,7 +802,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
 
   private val inst: XSInstBitFields = io.enq.ctrlFlow.instr.asTypeOf(new XSInstBitFields)
 
-  val decode_table: Array[(BitPat, List[BitPat])] = XDecode.table ++
+  private val baseDecodeTable: Array[(BitPat, List[BitPat])] = XDecode.table ++
     FpDecode.table ++
 //    FDivSqrtDecode.table ++
     BitmanipDecode.table ++
@@ -815,6 +815,18 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
     ZicondDecode.table ++
     ZimopDecode.table ++
     ZfaDecode.table
+
+  // The experimental host user return uses an exact encoding and existing return serialization.
+  private val userReturnEncoding = BigInt("00200073", 16)
+  private val userReturnDecode: Array[(BitPat, List[BitPat])] = if (HasUserTimerInterrupt) {
+    require(!baseDecodeTable.exists { case (pattern, _) =>
+      (userReturnEncoding & pattern.mask) == pattern.value
+    }, "Host user return encoding overlaps an existing instruction")
+    Array(BitPat("b00000000001000000000000001110011") ->
+      XSDecode(SrcType.reg, SrcType.imm, SrcType.X, FuType.csr, CSROpType.jmp,
+        SelImm.IMM_I, xWen = true, noSpec = true, blockBack = true).generate())
+  } else Array.empty
+  val decode_table: Array[(BitPat, List[BitPat])] = baseDecodeTable ++ userReturnDecode
 
   require(decode_table.map(_._2.length == 15).reduce(_ && _), "Decode tables have different column size")
   // assertion for LUI: only LUI should be assigned `selImm === SelImm.IMM_U && fuType === FuType.alu`

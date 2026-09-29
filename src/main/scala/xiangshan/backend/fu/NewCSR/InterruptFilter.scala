@@ -8,10 +8,13 @@ import xiangshan.ExceptionNO
 import xiangshan.backend.fu.NewCSR.CSRBundles.{CauseBundle, PrivState, XtvecBundle}
 import xiangshan.backend.fu.NewCSR.CSRDefines.{PrivMode, XtvecMode}
 import xiangshan.backend.fu.NewCSR.InterruptNO
+import xiangshan.backend.fu.NewCSR.CSREvents.InterruptDescriptor
 
 
-class InterruptFilter extends Module {
-  val io = IO(new InterruptFilterIO)
+class InterruptFilter(hasUserTimerInterrupt: Boolean = false) extends Module {
+  val io = IO(new InterruptFilterIO(hasUserTimerInterrupt))
+  val candidateStages = Option.when(hasUserTimerInterrupt)(
+    RegInit(VecInit(Seq.fill(6)(0.U.asTypeOf(Valid(new InterruptDescriptor))))))
 
   val privState = io.in.privState
   val mstatusMIE = io.in.mstatusMIE
@@ -520,6 +523,56 @@ class InterruptFilter extends Module {
   val vsIRModeCond = privState.isModeVS && vsstatusSIE || privState < PrivState.ModeVS
   val SelectCandidate5 = onlyC5Enable || C3C5Enable ||
                          C1C5Enable && (iprioC1 === iprioC2C5 && !hvictl.DPR.asBool || iprioC1 > iprioC2C5)
+  if (hasUserTimerInterrupt) {
+    val raw = Wire(Valid(new InterruptDescriptor))
+    val higherPending = intrVec.orR || enableDebugIntr || (vsIRModeCond && SelectCandidate5)
+    val huSelected = io.in.huCandidate.get && !higherPending && !io.in.huCandidateKill.get
+    raw.valid := higherPending || huSelected
+    raw.bits.cause := Mux(huSelected, 4.U, intrVec)
+    raw.bits.debug := enableDebugIntr
+    raw.bits.criticalDebug := io.in.criticalDebug.get && enableDebugIntr
+    raw.bits.nmi := io.in.nmi && !huSelected
+    raw.bits.virtualInterruptIsHvictlInject := vsIRModeCond && SelectCandidate5 && !io.in.nmi && !huSelected
+    raw.bits.irToHS := irToHS && !io.in.nmi && !huSelected
+    raw.bits.irToVS := irToVS && !io.in.nmi && !huSelected
+    raw.bits.irToHU := huSelected
+    raw.bits.isInterrupt := true.B
+    raw.bits.hvictlIID := hvictl.IID.asUInt
+    io.out.higherPriority.get := higherPending
+
+    // Every candidate stage owns a valid bit. Claims clear next state only, so ROB
+    // acceptance cannot feed combinationally back into its own selected valid.
+    val stages = candidateStages.get
+    def revoked(event: InterruptDescriptor): Bool = {
+      (event.irToHU && io.in.huCandidateKill.get) ||
+        (event.criticalDebug && io.in.criticalDebugInFlight.get) ||
+        (event.nmi && !event.debug && io.in.nmiInFlight.get.valid &&
+          event.cause === io.in.nmiInFlight.get.bits)
+    }
+    def claimed(event: InterruptDescriptor): Bool = {
+      (event.irToHU && io.in.huClaim.get) ||
+        (event.criticalDebug && io.in.criticalDebugClaim.get) ||
+        (event.nmi && !event.debug && io.in.nmiClaim.get.valid &&
+          event.cause === io.in.nmiClaim.get.bits)
+    }
+    for (i <- stages.indices) {
+      val source = if (i == 0) raw else stages(i - 1)
+      stages(i) := source
+      when(revoked(source.bits) || claimed(source.bits)) {
+        stages(i).valid := false.B
+      }
+    }
+    val selected = stages.last
+    io.out.candidate.get := selected
+    io.out.candidate.get.valid := selected.valid && !revoked(selected.bits)
+    io.out.interruptVec.valid := io.out.candidate.get.valid
+    io.out.interruptVec.bits := selected.bits.cause
+    io.out.debug := selected.bits.debug
+    io.out.nmi := selected.bits.nmi
+    io.out.virtualInterruptIsHvictlInject := selected.bits.virtualInterruptIsHvictlInject
+    io.out.irToHS := selected.bits.irToHS
+    io.out.irToVS := selected.bits.irToVS
+  } else {
   // delay at least 6 cycles to maintain the atomic of sret/mret
   // 65bit indict current interrupt is NMI
   val intrVecReg = RegInit(0.U(8.W))
@@ -548,6 +601,7 @@ class InterruptFilter extends Module {
   io.out.virtualInterruptIsHvictlInject := delayedVIIsHvictlInjectReg & !delayedNMI
   io.out.irToHS := delayedIRToHS & !delayedNMI
   io.out.irToVS := delayedIRToVS & !delayedNMI
+  }
 
   dontTouch(hsip)
   dontTouch(hsie)
@@ -556,8 +610,16 @@ class InterruptFilter extends Module {
   dontTouch(vsIRVec)
 }
 
-class InterruptFilterIO extends Bundle {
+class InterruptFilterIO(hasUserTimerInterrupt: Boolean = false) extends Bundle {
   val in = Input(new Bundle {
+    val huCandidate = Option.when(hasUserTimerInterrupt)(Bool())
+    val huCandidateKill = Option.when(hasUserTimerInterrupt)(Bool())
+    val huClaim = Option.when(hasUserTimerInterrupt)(Bool())
+    val nmiInFlight = Option.when(hasUserTimerInterrupt)(Valid(UInt(8.W)))
+    val nmiClaim = Option.when(hasUserTimerInterrupt)(Valid(UInt(8.W)))
+    val criticalDebug = Option.when(hasUserTimerInterrupt)(Bool())
+    val criticalDebugInFlight = Option.when(hasUserTimerInterrupt)(Bool())
+    val criticalDebugClaim = Option.when(hasUserTimerInterrupt)(Bool())
     val privState = new PrivState
     val mstatusMIE  = Bool()
     val sstatusSIE  = Bool()
@@ -600,6 +662,8 @@ class InterruptFilterIO extends Bundle {
   })
 
   val out = Output(new Bundle {
+    val candidate = Option.when(hasUserTimerInterrupt)(Valid(new InterruptDescriptor))
+    val higherPriority = Option.when(hasUserTimerInterrupt)(Bool())
     val debug = Bool()
     val nmi = Bool()
     val interruptVec = ValidIO(UInt(8.W))

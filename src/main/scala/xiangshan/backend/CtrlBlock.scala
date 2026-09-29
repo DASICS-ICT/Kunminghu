@@ -38,6 +38,9 @@ import xiangshan.frontend.{FtqPtr, FtqRead, Ftq_RF_Components}
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
 import xiangshan.backend.issue.{FpScheduler, IntScheduler, MemScheduler, VfScheduler}
 import xiangshan.backend.trace._
+import xiangshan.backend.fu.NewCSR.CSREvents.{HUEntryCompletion, HUEntryOutcome, InterruptEventIdentity}
+import xiangshan.backend.fu.NewCSR.CSRDefines.SatpMode
+import xiangshan.backend.fu.NewCSR.CSRConfig.PAddrWidth
 
 class CtrlToFtqIO(implicit p: Parameters) extends XSBundle {
   val rob_commits = Vec(CommitWidth, Valid(new RobCommitInfo))
@@ -100,6 +103,16 @@ class CtrlBlockImp(
 
   private val disableFusion = decode.io.csrCtrl.singlestep || !decode.io.csrCtrl.fusion_enable
 
+  // Control owns the accepted identity until its terminal target reaches the frontend.
+  private val huBusy = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val huEvent = Option.when(HasUserTimerInterrupt)(Reg(new InterruptEventIdentity))
+  private val huFrontendAhead = WireDefault(false.B)
+  private val huFrontendRedirect = WireDefault(0.U.asTypeOf(Valid(new Redirect)))
+  private val huFrontendBlocked = WireDefault(false.B)
+  private val huTraceBlocked = WireDefault(false.B)
+  private val huTraceIsTimer = WireDefault(false.B)
+  private val huTraceEvent = Option.when(HasUserTimerInterrupt)(WireDefault(0.U.asTypeOf(Valid(new InterruptEventIdentity))))
+
   private val s0_robFlushRedirect = rob.io.flushOut
   private val s1_robFlushRedirect = Wire(Valid(new Redirect))
   s1_robFlushRedirect.valid := GatedValidRegNext(s0_robFlushRedirect.valid, false.B)
@@ -108,7 +121,12 @@ class CtrlBlockImp(
   pcMem.io.ren.get(pcMemRdIndexes("robFlush").head) := s0_robFlushRedirect.valid
   pcMem.io.raddr(pcMemRdIndexes("robFlush").head) := s0_robFlushRedirect.bits.ftqIdx.value
   private val s1_robFlushPc = pcMem.io.rdata(pcMemRdIndexes("robFlush").head).startAddr + (RegEnable(s0_robFlushRedirect.bits.ftqOffset, s0_robFlushRedirect.valid) << instOffsetBits)
-  private val s3_redirectGen = redirectGen.io.stage2Redirect
+  private val s3_redirectGen = WireInit(redirectGen.io.stage2Redirect)
+  if (HasUserTimerInterrupt) {
+    // Younger redirects cannot displace a target already owned by the ROB head.
+    s3_redirectGen.valid := redirectGen.io.stage2Redirect.valid &&
+      (!huBusy.get || huEvent.get.robIdx.needFlush(redirectGen.io.stage2Redirect))
+  }
   private val s1_s3_redirect = Mux(s1_robFlushRedirect.valid, s1_robFlushRedirect, s3_redirectGen)
   private val s2_s4_pendingRedirectValid = RegInit(false.B)
   when (s1_s3_redirect.valid) {
@@ -120,6 +138,118 @@ class CtrlBlockImp(
   // Redirect will be RegNext at ExuBlocks and IssueBlocks
   val s2_s4_redirect = RegNextWithEnable(s1_s3_redirect)
   val s3_s5_redirect = RegNextWithEnable(s2_s4_redirect)
+
+  if (HasUserTimerInterrupt) {
+    val delivery = io.robio.csr.userTimerDelivery.get
+    val entry = delivery.entry
+    val savedSatpMode = Reg(UInt(4.W))
+    val savedPc = Reg(UInt(XLEN.W))
+    val pcReady = RegInit(false.B)
+    val requestSent = RegInit(false.B)
+    val terminalPending = RegInit(false.B)
+    val terminal = Reg(new HUEntryCompletion)
+    val aheadSent = RegInit(false.B)
+    val superseded = RegInit(false.B)
+    val externalTargetConsumed = RegInit(false.B)
+    val s1HuFlush = s1_robFlushRedirect.valid && s1_robFlushRedirect.bits.isHUTimer.get
+    val reconstructedPc = ZeroExt(s1_robFlushPc, XLEN)
+    val precisePc = MuxCase(ZeroExt(reconstructedPc(PAddrWidth - 1, 0), XLEN), Seq(
+      (savedSatpMode === SatpMode.Sv39.asUInt) -> SignExt(reconstructedPc(38, 0), XLEN),
+      (savedSatpMode === SatpMode.Sv48.asUInt) -> SignExt(reconstructedPc(47, 0), XLEN)
+    ))
+
+    def belongsToHu(redirect: Redirect): Bool = redirect.isHUTimer.get &&
+      redirect.robIdx === huEvent.get.robIdx && redirect.ftqIdx === huEvent.get.ftqIdx &&
+      redirect.ftqOffset === huEvent.get.ftqOffset
+
+    val externalKill = huBusy.get && !belongsToHu(s1_s3_redirect.bits) && huEvent.get.robIdx.needFlush(s1_s3_redirect)
+    val externalConsumed = huBusy.get && !belongsToHu(io.frontend.toFtq.redirect.bits) &&
+      huEvent.get.robIdx.needFlush(io.frontend.toFtq.redirect)
+
+    rob.io.huCanAccept.get := !huBusy.get && !s2_s4_pendingRedirectValid &&
+      !s1_s3_redirect.valid && !s2_s4_redirect.valid && !s3_s5_redirect.valid
+    when(entry.reserve.fire) {
+      huBusy.get := true.B
+      huEvent.get := entry.reserve.bits
+      savedSatpMode := entry.satpMode
+      pcReady := false.B
+      requestSent := false.B
+      terminalPending := false.B
+      aheadSent := false.B
+      superseded := false.B
+      externalTargetConsumed := false.B
+    }
+    when(s1HuFlush) {
+      assert(huBusy.get)
+      assert(belongsToHu(s1_robFlushRedirect.bits))
+      savedPc := precisePc
+      pcReady := true.B
+    }
+
+    // Bypass the synchronous FTQ result at A1; otherwise retain it through backpressure.
+    entry.request.valid := huBusy.get && !requestSent && (pcReady || s1HuFlush)
+    entry.request.bits.event := huEvent.get
+    entry.request.bits.pc := Mux(s1HuFlush, precisePc, savedPc)
+    when(entry.request.fire) {
+      requestSent := true.B
+    }
+    entry.cancel.valid := huBusy.get && !terminalPending && !entry.effectLocked && (superseded || externalKill)
+    entry.cancel.bits.event := huEvent.get
+    entry.cancel.bits.externalRedirect := true.B
+    when(externalKill && !terminalPending && !entry.effectLocked) {
+      superseded := true.B
+    }
+    when(externalConsumed) {
+      externalTargetConsumed := true.B
+    }
+
+    // HU entry takes effect at this handshake, which also reserves terminal trace capacity.
+    entry.completion.ready := huBusy.get && !terminalPending && !huTraceBlocked
+    huTraceEvent.get.valid := entry.completion.fire && entry.completion.bits.outcome =/= HUEntryOutcome.replay &&
+      !superseded && !externalKill
+    huTraceIsTimer := entry.completion.fire && entry.completion.bits.outcome === HUEntryOutcome.enter
+    huTraceEvent.get.bits := entry.completion.bits.event
+    when(entry.completion.fire) {
+      assert(entry.completion.bits.event.asUInt === huEvent.get.asUInt)
+      assert(requestSent || entry.request.fire)
+      assert(!externalKill || superseded || entry.completion.bits.outcome === HUEntryOutcome.replay)
+      terminal := entry.completion.bits
+      terminalPending := true.B
+    }
+
+    // The terminal target is immutable after effect. Its SRAM read precedes delivery by one cycle.
+    huFrontendAhead := terminalPending && !superseded && !aheadSent && !huFrontendBlocked
+    when(huFrontendAhead) {
+      aheadSent := true.B
+    }
+    huFrontendRedirect.valid := terminalPending && !superseded && aheadSent
+    huFrontendRedirect.bits := 0.U.asTypeOf(new Redirect)
+    huFrontendRedirect.bits.robIdx := terminal.event.robIdx
+    huFrontendRedirect.bits.ftqIdx := terminal.event.ftqIdx
+    huFrontendRedirect.bits.ftqOffset := terminal.event.ftqOffset
+    huFrontendRedirect.bits.isRVC := terminal.event.isRVC
+    huFrontendRedirect.bits.isHUTimer.get := true.B
+    huFrontendRedirect.bits.level := RedirectLevel.flush
+    huFrontendRedirect.bits.interrupt := terminal.outcome =/= HUEntryOutcome.replay
+    huFrontendRedirect.bits.cfiUpdate.pc := savedPc
+    huFrontendRedirect.bits.cfiUpdate.target := terminal.target.pc
+    huFrontendRedirect.bits.fullTarget := terminal.target.pc
+    huFrontendRedirect.bits.cfiUpdate.backendIAF := terminal.target.raiseIAF
+    huFrontendRedirect.bits.cfiUpdate.backendIPF := terminal.target.raiseIPF
+    huFrontendRedirect.bits.cfiUpdate.backendIGPF := terminal.target.raiseIGPF
+    entry.release := huFrontendRedirect.valid ||
+      (terminalPending && superseded && (externalTargetConsumed || externalConsumed))
+    when(entry.release) {
+      huBusy.get := false.B
+      pcReady := false.B
+      requestSent := false.B
+      terminalPending := false.B
+      aheadSent := false.B
+    }
+    when(huBusy.get && (entry.effectLocked || terminalPending) && !superseded) {
+      assert(!externalKill, "An older instruction redirect cannot replace a locked HU terminal target")
+    }
+  }
 
   private val delayedNotFlushedWriteBack = io.fromWB.wbData.map(x => {
     val valid = x.valid
@@ -192,6 +322,7 @@ class CtrlBlockImp(
     val out = Wire(Valid(new Redirect()))
     out.valid := x.valid && x.bits.redirect.get.valid && (x.bits.redirect.get.bits.cfiUpdate.isMisPred || x.bits.redirect.get.bits.cfiUpdate.hasBackendFault) && !x.bits.robIdx.needFlush(Seq(s1_s3_redirect, s2_s4_redirect))
     out.bits := x.bits.redirect.get.bits
+    out.bits.isHUTimer.foreach(_ := false.B)
     out.bits.debugIsCtrl := true.B
     out.bits.debugIsMemVio := false.B
     // for fix timing, next cycle assgin
@@ -212,6 +343,7 @@ class CtrlBlockImp(
   val loadReplay = Wire(ValidIO(new Redirect))
   loadReplay.valid := GatedValidRegNext(memViolation.valid)
   loadReplay.bits := RegEnable(memViolation.bits, memViolation.valid)
+  loadReplay.bits.isHUTimer.foreach(_ := false.B)
   loadReplay.bits.debugIsCtrl := false.B
   loadReplay.bits.debugIsMemVio := true.B
 
@@ -280,6 +412,21 @@ class CtrlBlockImp(
   trace.io.in.fromEncoder.enable := io.traceCoreInterface.fromEncoder.enable
   trace.io.in.fromRob            := rob.io.trace.traceCommitInfo
   rob.io.trace.blockCommit       := trace.io.out.blockRobCommit
+  if (HasUserTimerInterrupt) {
+    // The terminal packet must leave trace stage 1 before a later trap can replace its bits.
+    huTraceBlocked := trace.io.out.blockRobCommit || trace.io.out.blockRobCommitNext.get
+    when(huTraceEvent.get.valid) {
+      assert(!rob.io.trace.traceCommitInfo.blocks.map(_.valid).reduce(_ || _))
+      trace.io.in.fromRob := 0.U.asTypeOf(trace.io.in.fromRob)
+      val block = trace.io.in.fromRob.blocks.head
+      block.valid := true.B
+      block.bits.ftqIdx.foreach(_ := huTraceEvent.get.bits.ftqIdx)
+      block.bits.ftqOffset.foreach(_ := huTraceEvent.get.bits.ftqOffset)
+      block.bits.tracePipe.itype := Itype.Interrupt
+      block.bits.tracePipe.ilastsize := Mux(huTraceEvent.get.bits.isRVC, Ilastsize.HalfWord, Ilastsize.Word)
+      block.bits.huTimer.get := huTraceIsTimer
+    }
+  }
   val tracePcStart = Wire(Vec(TraceGroupNum, UInt(IaddrWidth.W)))
   for ((pcMemIdx, i) <- pcMemRdIndexes("trace").zipWithIndex) {
     val traceValid = trace.toPcMem.blocks(i).valid
@@ -293,9 +440,12 @@ class CtrlBlockImp(
     io.fromCSR.traceCSR.lastPriv,
     io.fromCSR.traceCSR.currentPriv
   )
-  io.traceCoreInterface.toEncoder.trap.cause := io.fromCSR.traceCSR.cause.asUInt
-  io.traceCoreInterface.toEncoder.trap.tval  := io.fromCSR.traceCSR.tval.asUInt
-  io.traceCoreInterface.toEncoder.priv       := tracePriv
+  val huTraceAtEncoder = trace.toEncoder.blocks.map(block =>
+    block.valid && block.bits.huTimer.getOrElse(false.B)).reduce(_ || _)
+  io.traceCoreInterface.toEncoder.trap.cause := Mux(huTraceAtEncoder,
+    "h8000000000000004".U(CauseWidth.W), io.fromCSR.traceCSR.cause.asUInt)
+  io.traceCoreInterface.toEncoder.trap.tval  := Mux(huTraceAtEncoder, 0.U, io.fromCSR.traceCSR.tval.asUInt)
+  io.traceCoreInterface.toEncoder.priv       := Mux(huTraceAtEncoder, Priv.HU, tracePriv)
   (0 until TraceGroupNum).foreach(i => {
     io.traceCoreInterface.toEncoder.groups(i).valid := trace.io.out.toEncoder.blocks(i).valid
     io.traceCoreInterface.toEncoder.groups(i).bits.iaddr := tracePcStart(i)
@@ -327,9 +477,11 @@ class CtrlBlockImp(
 
   redirectGen.io.robFlush := s1_robFlushRedirect
 
-  val s5_flushFromRobValidAhead = DelayN(s1_robFlushRedirect.valid, 4)
+  val s1_legacyRobFlush = s1_robFlushRedirect.valid && !s1_robFlushRedirect.bits.isHUTimer.getOrElse(false.B)
+  val s5_flushFromRobValidAhead = DelayN(s1_legacyRobFlush, 4)
   val s6_flushFromRobValid = GatedValidRegNext(s5_flushFromRobValidAhead)
-  val frontendFlushBits = RegEnable(s1_robFlushRedirect.bits, s1_robFlushRedirect.valid) // ??
+  val frontendFlushBits = RegEnable(s1_robFlushRedirect.bits, s1_legacyRobFlush) // ??
+  huFrontendBlocked := s5_flushFromRobValidAhead || s6_flushFromRobValid || s3_redirectGen.valid
   // When ROB commits an instruction with a flush, we notify the frontend of the flush without the commit.
   // Flushes to frontend may be delayed by some cycles and commit before flush causes errors.
   // Thus, we make all flush reasons to behave the same as exceptions for frontend.
@@ -340,22 +492,24 @@ class CtrlBlockImp(
     io.frontend.toFtq.rob_commits(i).valid := GatedValidRegNext(s1_isCommit)
     io.frontend.toFtq.rob_commits(i).bits := RegEnable(rob.io.commits.info(i), s1_isCommit)
   }
-  io.frontend.toFtq.redirect.valid := s6_flushFromRobValid || s3_redirectGen.valid
-  io.frontend.toFtq.redirect.bits := Mux(s6_flushFromRobValid, frontendFlushBits, s3_redirectGen.bits)
-  io.frontend.toFtq.ftqIdxSelOH.valid := s6_flushFromRobValid || redirectGen.io.stage2Redirect.valid
-  io.frontend.toFtq.ftqIdxSelOH.bits := Cat(s6_flushFromRobValid, redirectGen.io.stage2oldestOH & Fill(NumRedirect + 1, !s6_flushFromRobValid))
+  io.frontend.toFtq.redirect.valid := huFrontendRedirect.valid || s6_flushFromRobValid || s3_redirectGen.valid
+  io.frontend.toFtq.redirect.bits := Mux(huFrontendRedirect.valid, huFrontendRedirect.bits,
+    Mux(s6_flushFromRobValid, frontendFlushBits, s3_redirectGen.bits))
+  io.frontend.toFtq.ftqIdxSelOH.valid := huFrontendRedirect.valid || s6_flushFromRobValid || s3_redirectGen.valid
+  io.frontend.toFtq.ftqIdxSelOH.bits := Cat(huFrontendRedirect.valid || s6_flushFromRobValid,
+    redirectGen.io.stage2oldestOH & Fill(NumRedirect + 1, !s6_flushFromRobValid && !huFrontendRedirect.valid))
 
   //jmp/brh, sel oldest first, only use one read port
-  io.frontend.toFtq.ftqIdxAhead(0).valid := RegNext(oldestExuRedirect.valid) && !s1_robFlushRedirect.valid && !s5_flushFromRobValidAhead
+  io.frontend.toFtq.ftqIdxAhead(0).valid := RegNext(oldestExuRedirect.valid) && !s1_robFlushRedirect.valid && !s5_flushFromRobValidAhead && !huFrontendAhead
   io.frontend.toFtq.ftqIdxAhead(0).bits := RegEnable(oldestExuRedirect.bits.ftqIdx, oldestExuRedirect.valid)
   //loadreplay
-  io.frontend.toFtq.ftqIdxAhead(NumRedirect).valid := loadReplay.valid && !s1_robFlushRedirect.valid && !s5_flushFromRobValidAhead
+  io.frontend.toFtq.ftqIdxAhead(NumRedirect).valid := loadReplay.valid && !s1_robFlushRedirect.valid && !s5_flushFromRobValidAhead && !huFrontendAhead
   io.frontend.toFtq.ftqIdxAhead(NumRedirect).bits := loadReplay.bits.ftqIdx
   //exception
-  io.frontend.toFtq.ftqIdxAhead.last.valid := s5_flushFromRobValidAhead
-  io.frontend.toFtq.ftqIdxAhead.last.bits := frontendFlushBits.ftqIdx
+  io.frontend.toFtq.ftqIdxAhead.last.valid := huFrontendAhead || s5_flushFromRobValidAhead
+  io.frontend.toFtq.ftqIdxAhead.last.bits := Mux(huFrontendAhead, huFrontendRedirect.bits.ftqIdx, frontendFlushBits.ftqIdx)
 
-  // Be careful here:
+  // Legacy ROB targets use this fixed pipeline; HU targets follow completion above.
   // T0: rob.io.flushOut, s0_robFlushRedirect
   // T1: s1_robFlushRedirect, rob.io.exception.valid
   // T2: csr.redirect.valid
@@ -367,14 +521,14 @@ class CtrlBlockImp(
     s1_robFlushPc, // replay inst
     s1_robFlushPc + Mux(s1_robFlushRedirect.bits.isRVC, 2.U, 4.U) // flush pipe
   ), s1_robFlushRedirect.valid)
-  private val s5_csrIsTrap = DelayN(rob.io.exception.valid, 4)
+  private val s5_csrIsTrap = DelayN(rob.io.exception.valid && !rob.io.exception.bits.interruptEvent.map(_.interrupt.irToHU).getOrElse(false.B), 4)
   private val s5_trapTargetFromCsr = io.robio.csr.trapTarget
 
   val flushTarget = Mux(s5_csrIsTrap, s5_trapTargetFromCsr.pc, s2_robFlushPc)
   val s5_trapTargetIAF = Mux(s5_csrIsTrap, s5_trapTargetFromCsr.raiseIAF, false.B)
   val s5_trapTargetIPF = Mux(s5_csrIsTrap, s5_trapTargetFromCsr.raiseIPF, false.B)
   val s5_trapTargetIGPF = Mux(s5_csrIsTrap, s5_trapTargetFromCsr.raiseIGPF, false.B)
-  when (s6_flushFromRobValid) {
+  when (s6_flushFromRobValid && !huFrontendRedirect.valid) {
     io.frontend.toFtq.redirect.bits.level := RedirectLevel.flush
     io.frontend.toFtq.redirect.bits.cfiUpdate.target := RegEnable(flushTarget, s5_flushFromRobValidAhead)
     io.frontend.toFtq.redirect.bits.cfiUpdate.backendIAF := RegEnable(s5_trapTargetIAF, s5_flushFromRobValidAhead)
@@ -753,7 +907,23 @@ class CtrlBlockImp(
   io.redirect := s1_s3_redirect
 
   // rob to int block
-  io.robio.csr <> rob.io.csr
+  io.robio.csr.elements.filterNot(_._1 == "userTimerDelivery").foreach { case (name, field) =>
+    field <> rob.io.csr.elements(name)
+  }
+  if (HasUserTimerInterrupt) {
+    val delivery = io.robio.csr.userTimerDelivery.get
+    val robDelivery = rob.io.csr.userTimerDelivery.get
+    robDelivery.candidate := delivery.candidate
+    robDelivery.candidateKill := delivery.candidateKill
+    delivery.accepted := robDelivery.accepted
+    delivery.entry.reserve <> robDelivery.entry.reserve
+    robDelivery.entry.request.ready := false.B
+    robDelivery.entry.completion.valid := false.B
+    robDelivery.entry.completion.bits := 0.U.asTypeOf(robDelivery.entry.completion.bits)
+    robDelivery.entry.canceled := false.B
+    robDelivery.entry.effectLocked := false.B
+    robDelivery.entry.satpMode := delivery.entry.satpMode
+  }
   // When wfi is disabled, it will not block ROB commit.
   rob.io.csr.wfiEvent := io.robio.csr.wfiEvent
   rob.io.wfi_enable := decode.io.csrCtrl.wfi_enable

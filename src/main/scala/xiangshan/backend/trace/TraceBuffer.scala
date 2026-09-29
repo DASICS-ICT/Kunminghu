@@ -17,6 +17,7 @@ class TraceBuffer(implicit val p: Parameters) extends Module
     }
     val out = new Bundle { // output groups to pcMem
       val blockCommit = Output(Bool())
+      val blockCommitNext = Option.when(HasUserTimerInterrupt)(Output(Bool()))
       val groups = new TraceBundle(hasIaddr = false, TraceGroupNum, IretireWidthCompressed)
     }
   })
@@ -59,7 +60,9 @@ class TraceBuffer(implicit val p: Parameters) extends Module
   enqPtr := enqPtrNext
   deqPtr := deqPtrNext
   val canNotTraceAll = distanceBetween(enqPtrNext, deqPtrNext) > 0.U
-  blockCommit := io.in.fromEncoder.enable && (canNotTraceAll || io.in.fromEncoder.stall)
+  val blockCommitNext = io.in.fromEncoder.enable && (canNotTraceAll || io.in.fromEncoder.stall)
+  blockCommit := blockCommitNext
+  io.out.blockCommitNext.foreach(_ := blockCommitNext)
 
   enqPtrNext := enqPtr + numNeedPc
   deqPtrNext := Mux(deqPtr + TraceGroupNum.U > enqPtrNext, enqPtrNext, deqPtr + TraceGroupNum.U)

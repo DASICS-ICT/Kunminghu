@@ -4,12 +4,13 @@ import chisel3._
 import chisel3.util._
 import chisel3.util.experimental.decode.TruthTable
 import freechips.rocketchip.rocket.CSRs
+import xiangshan.HasXSParameter
 import xiangshan.backend.fu.NewCSR.CSRBundles.{Counteren, PrivState}
 import xiangshan.backend.fu.NewCSR.CSRDefines._
 import org.chipsalliance.cde.config.Parameters
 import system.HasSoCParameter
 
-class CSRPermitModule(implicit p: Parameters) extends Module {
+class CSRPermitModule(implicit val p: Parameters) extends Module with HasXSParameter {
   val io = IO(new CSRPermitIO)
 
   val xRetPermitMod = Module(new XRetPermitModule)
@@ -23,6 +24,8 @@ class CSRPermitModule(implicit p: Parameters) extends Module {
   xRetPermitMod.io.in.debugMode := io.in.debugMode
   xRetPermitMod.io.in.xRet      := io.in.xRet
   xRetPermitMod.io.in.status    := io.in.status
+  xRetPermitMod.io.in.userHandler := io.in.userHandler
+  xRetPermitMod.io.in.userTimerEnabled := io.in.userTimerEnabled
 
   mLevelPermitMod.io.in.csrAccess  := io.in.csrAccess
   mLevelPermitMod.io.in.privState  := io.in.privState
@@ -73,10 +76,23 @@ class CSRPermitModule(implicit p: Parameters) extends Module {
   val indirectPermit_EX_II = indirectCSRPermitMod.io.out.indirectCSR_EX_II
   val indirectPermit_EX_VI = indirectCSRPermitMod.io.out.indirectCSR_EX_VI
 
-  val directPermit_illegal = mPermit_EX_II || sPermit_EX_II || pPermit_EX_II || pPermit_EX_VI || vPermit_EX_II || vPermit_EX_VI
+  // All host user timer CSRs share custom-state permission, including the legacy U addresses.
+  // Guest access is always illegal and must suppress writes before the legal-write result is formed.
+  private val userTimerPermit_EX_II = if (HasUserTimerInterrupt) {
+    val addr = io.in.csrAccess.addr
+    val privState = io.in.privState
+    val isUserTimerCSR = UserTimerCSRAddress.all.map(csr => addr === csr.U).reduce(_ || _)
+    isUserTimerCSR && (
+      privState.isVirtual ||
+      (!privState.isModeM && !io.in.xstateen.mstateen0.C.asBool) ||
+      (privState.isModeHU && !io.in.xstateen.sstateen0.C.asBool)
+    )
+  } else false.B
+
+  val directPermit_illegal = mPermit_EX_II || sPermit_EX_II || pPermit_EX_II || pPermit_EX_VI || vPermit_EX_II || vPermit_EX_VI || userTimerPermit_EX_II
 
   val csrAccess_EX_II = csrAccess && (
-    (mPermit_EX_II || sPermit_EX_II || pPermit_EX_II || vPermit_EX_II) ||
+    (mPermit_EX_II || sPermit_EX_II || pPermit_EX_II || vPermit_EX_II || userTimerPermit_EX_II) ||
     (!directPermit_illegal && indirectPermit_EX_II)
   )
   val csrAccess_EX_VI = csrAccess && (
@@ -95,6 +111,7 @@ class CSRPermitModule(implicit p: Parameters) extends Module {
   io.out.hasLegalMret  := xRetPermitMod.io.out.hasLegalMret
   io.out.hasLegalSret  := xRetPermitMod.io.out.hasLegalSret
   io.out.hasLegalDret  := xRetPermitMod.io.out.hasLegalDret
+  io.out.hasLegalUret  := xRetPermitMod.io.out.hasLegalUret
 
   io.out.hasLegalWriteFcsr := mLevelPermitMod.io.out.hasLegalWriteFcsr
   io.out.hasLegalWriteVcsr := mLevelPermitMod.io.out.hasLegalWriteVcsr
@@ -105,6 +122,8 @@ class XRetPermitModule extends Module {
     val in = Input(new Bundle {
       val privState = new PrivState
       val debugMode = Bool()
+      val userHandler = Bool()
+      val userTimerEnabled = Bool()
       val xRet = new xRetIO
       val status = new statusIO
     })
@@ -115,6 +134,7 @@ class XRetPermitModule extends Module {
       val hasLegalMret  = Bool()
       val hasLegalSret  = Bool()
       val hasLegalDret  = Bool()
+      val hasLegalUret  = Bool()
     })
   })
 
@@ -123,11 +143,12 @@ class XRetPermitModule extends Module {
     io.in.debugMode,
   )
 
-  private val (mnret, mret, sret, dret) = (
+  private val (mnret, mret, sret, dret, uret) = (
     io.in.xRet.mnret,
     io.in.xRet.mret,
     io.in.xRet.sret,
     io.in.xRet.dret,
+    io.in.xRet.uret,
   )
 
   private val (tsr, vtsr) = (
@@ -148,12 +169,18 @@ class XRetPermitModule extends Module {
   private val dret_EX_II = dret && !debugMode
   private val dretIllegal = dret_EX_II
 
-  io.out.Xret_EX_II := mnret_EX_II || mret_EX_II || sret_EX_II || dret_EX_II
+  // Returning from an existing host user handler remains legal after stateen revocation.
+  // The instruction grants no software access to the custom CSR bank.
+  private val uret_EX_II = uret && !(io.in.userTimerEnabled && privState.isModeHU &&
+    io.in.userHandler && !debugMode)
+
+  io.out.Xret_EX_II := mnret_EX_II || mret_EX_II || sret_EX_II || dret_EX_II || uret_EX_II
   io.out.Xret_EX_VI := sret_EX_VI
   io.out.hasLegalMNret := mnret && !mnretIllegal
   io.out.hasLegalMret  := mret  && !mretIllegal
   io.out.hasLegalSret  := sret  && !sretIllegal
   io.out.hasLegalDret  := dret  && !dretIllegal
+  io.out.hasLegalUret  := uret  && !uret_EX_II
 }
 
 class MLevelPermitModule extends Module {
@@ -538,6 +565,7 @@ class xRetIO extends Bundle {
   val mret = Bool()
   val sret = Bool()
   val dret = Bool()
+  val uret = Bool()
 }
 
 class statusIO extends Bundle {
@@ -599,6 +627,8 @@ class CSRPermitIO extends Bundle {
     val csrAccess = new csrAccessIO
     val privState = new PrivState
     val debugMode = Bool()
+    val userHandler = Bool()
+    val userTimerEnabled = Bool()
     val xRet = new xRetIO
     val status = new statusIO
     val xcounteren = new xcounterenIO
@@ -613,6 +643,7 @@ class CSRPermitIO extends Bundle {
     val hasLegalMret  = Bool()
     val hasLegalSret  = Bool()
     val hasLegalDret  = Bool()
+    val hasLegalUret  = Bool()
     val hasLegalWriteFcsr = Bool()
     val hasLegalWriteVcsr = Bool()
     val EX_II = Bool()

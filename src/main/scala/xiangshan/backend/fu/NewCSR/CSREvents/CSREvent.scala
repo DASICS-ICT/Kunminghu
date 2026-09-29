@@ -29,6 +29,9 @@ trait CSREvents { self: NewCSR =>
 
   val dretEvent  = Module(new DretEventModule)
 
+  val trapEntryHUEvent = if (HasUserTimerInterrupt) Some(Module(new TrapEntryHUEvent)) else None
+  val uretEvent = if (HasUserTimerInterrupt) Some(Module(new UretEvent)) else None
+
   val events: Seq[Module with CSREventBase] = Seq(
     trapEntryDEvent,
     trapEntryMEvent,
@@ -39,7 +42,7 @@ trait CSREvents { self: NewCSR =>
     sretEvent,
     dretEvent,
     mnretEvent,
-  )
+  ) ++ trapEntryHUEvent.toSeq ++ uretEvent.toSeq
 
   events.foreach(x => dontTouch(x.out))
 

@@ -858,6 +858,7 @@ object Bundles {
   }
 
   class ExceptionInfo(implicit p: Parameters) extends XSBundle {
+    val interruptEvent = Option.when(HasUserTimerInterrupt)(new xiangshan.backend.fu.NewCSR.CSREvents.InterruptEventIdentity)
     val pc = UInt(VAddrData().dataWidth.W)
     val instr = UInt(32.W)
     val commitType = CommitType()

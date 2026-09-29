@@ -33,6 +33,7 @@ import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
 import xiangshan.backend.Bundles.{DynInst, ExceptionInfo, ExuOutput}
 import xiangshan.backend.ctrlblock.{DebugLSIO, DebugLsInfo, LsTopdownInfo}
 import xiangshan.backend.fu.NewCSR.CSREvents.TargetPCBundle
+import xiangshan.backend.fu.NewCSR.CSREvents.UserTimerDeliveryIO
 import xiangshan.backend.fu.vector.Bundles.{Nf, VLmul, VSew, VType}
 import xiangshan.backend.rename.SnapshotGenerator
 import xiangshan.backend.trace._
@@ -75,6 +76,8 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val realDestSize = UInt(log2Up(MaxUopSize + 1).W)
     val uopNum = UInt(log2Up(MaxUopSize + 1).W)
     val needFlush = Bool()
+    // HU may interrupt a ROB group only after its last uop has actually entered.
+    val huGroupSealed = Option.when(HasUserTimerInterrupt)(Bool())
     // status end
 
     // debug_begin
@@ -112,6 +115,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val fpWen = Bool()
     val rfWen = Bool()
     val needFlush = Bool()
+    val huGroupSealed = Option.when(HasUserTimerInterrupt)(Bool())
     // trace
     val traceBlockInPipe = new TracePipe(IretireWidthInPipe)
     // debug_begin
@@ -140,6 +144,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robEntry.dirtyVs := robEnq.dirtyVs
     // flushPipe needFlush but not exception
     robEntry.needFlush := robEnq.hasException || robEnq.flushPipe
+    robEntry.huGroupSealed.foreach(_ := robEnq.lastUop)
     // trace
     robEntry.traceBlockInPipe := robEnq.traceBlockInPipe
     robEntry.debug_pc.foreach(_ := robEnq.pc)
@@ -173,6 +178,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robCommitEntry.dirtyFs := robEntry.fpWen || robEntry.wflags
     robCommitEntry.dirtyVs := robEntry.dirtyVs
     robCommitEntry.needFlush := robEntry.needFlush
+    robCommitEntry.huGroupSealed.foreach(_ := robEntry.huGroupSealed.get)
     robCommitEntry.traceBlockInPipe := robEntry.traceBlockInPipe
     robCommitEntry.debug_pc.foreach(_ := robEntry.debug_pc.get)
     robCommitEntry.debug_instr.foreach(_ := robEntry.debug_instr.get)
@@ -217,6 +223,7 @@ object RobPtr {
 }
 
 class RobCSRIO(implicit p: Parameters) extends XSBundle {
+  val userTimerDelivery = Option.when(HasUserTimerInterrupt)(Flipped(new UserTimerDeliveryIO))
   val intrBitSet = Input(Bool())
   val trapTarget = Input(new TargetPCBundle)
   val isXRet     = Input(Bool())

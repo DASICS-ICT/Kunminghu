@@ -38,6 +38,7 @@ import xiangshan.backend.{BackendParams, RatToVecExcpMod, RegWriteFromRab, VecEx
 import xiangshan.backend.Bundles.{DynInst, ExceptionInfo, ExuOutput}
 import xiangshan.backend.decode.isa.bitfield.XSInstBitFields
 import xiangshan.backend.fu.{FuConfig, FuType}
+import xiangshan.backend.fu.NewCSR.CSREvents.{InterruptDescriptor, InterruptEventIdentity}
 import xiangshan.frontend.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
 import xiangshan.backend.Bundles.{DynInst, ExceptionInfo, ExuOutput}
@@ -84,6 +85,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val lsq = new RobLsqIO
     val robDeqPtr = Output(new RobPtr)
     val csr = new RobCSRIO
+    val huCanAccept = Option.when(HasUserTimerInterrupt)(Input(Bool()))
     val snpt = Input(new SnapshotPort)
     val robFull = Output(Bool())
     val headNotReady = Output(Bool())
@@ -562,8 +564,28 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val deqPtrEntry = rawInfo(0)
   val deqPtrEntryValid = deqPtrEntry.commit_v
   val deqHasFlushed = RegInit(false.B)
-  val intrBitSetReg = RegNext(io.csr.intrBitSet)
-  val intrEnable = intrBitSetReg && !hasWaitForward && deqPtrEntry.interrupt_safe && !deqHasFlushed
+  val huAccepted = WireDefault(false.B)
+  val interruptClaim = WireDefault(false.B)
+  val huAcceptanceBlocked = WireDefault(false.B)
+  val interruptDescriptorReg = Option.when(HasUserTimerInterrupt)(Reg(new InterruptDescriptor))
+  val intrBitSetReg = if (HasUserTimerInterrupt) {
+    val delivery = io.csr.userTimerDelivery.get
+    val candidateValid = RegInit(false.B)
+    val candidateBits = interruptDescriptorReg.get
+    candidateValid := delivery.candidate.valid && !(delivery.candidateKill && delivery.candidate.bits.irToHU)
+    when(delivery.candidate.valid) {
+      candidateBits := delivery.candidate.bits
+    }
+    // A claim clears only its matching incoming candidate, preserving a simultaneous winner.
+    when(interruptClaim) {
+      candidateValid := false.B
+    }
+    candidateValid && !(delivery.candidateKill && candidateBits.irToHU)
+  } else RegNext(io.csr.intrBitSet)
+  val selectedHU = intrBitSetReg && interruptDescriptorReg.map(_.irToHU).getOrElse(false.B)
+  val legacyIntrBitSet = intrBitSetReg && !selectedHU
+  val intrEnable = Wire(Bool())
+  intrEnable := (legacyIntrBitSet && !hasWaitForward && deqPtrEntry.interrupt_safe && !deqHasFlushed) || huAccepted
   val deqNeedFlush = deqPtrEntry.needFlush && deqPtrEntry.commit_v && deqPtrEntry.commit_w
   val deqHitExceptionGenState = exceptionDataRead.valid && exceptionDataRead.bits.robIdx === deqPtr
   val deqNeedFlushAndHitExceptionGenState = deqNeedFlush && deqHitExceptionGenState
@@ -609,6 +631,31 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   // Block any redirect or commit at the next cycle.
   val lastCycleFlush = RegNext(io.flushOut.valid)
 
+  val selectedInterruptEvent = Option.when(HasUserTimerInterrupt)(Wire(new InterruptEventIdentity))
+  if (HasUserTimerInterrupt) {
+    val delivery = io.csr.userTimerDelivery.get
+    val event = selectedInterruptEvent.get
+    event.interrupt := Mux(intrEnable, interruptDescriptorReg.get, 0.U.asTypeOf(new InterruptDescriptor))
+    event.robIdx := deqPtr
+    event.ftqIdx := deqPtrEntry.ftqIdx
+    event.ftqOffset := deqPtrEntry.ftqOffset
+    event.isRVC := deqPtrEntry.isRVC
+    delivery.entry.reserve.valid := selectedHU && io.huCanAccept.get &&
+      !(delivery.candidate.valid && !delivery.candidate.bits.irToHU) &&
+      state === s_idle && deqPtrEntryValid && deqPtrEntry.huGroupSealed.get && deqPtrEntry.commit_w &&
+      deqPtrEntry.interrupt_safe && !hasWaitForward && !deqHasFlushed && !deqPtrEntry.needFlush &&
+      !deqHasException && !isFlushPipe && !lastCycleFlush && !io.redirect.valid && !huAcceptanceBlocked
+    delivery.entry.reserve.bits := event
+    // The reserve payload describes the candidate before reserve.ready selects intrEnable.
+    delivery.entry.reserve.bits.interrupt := interruptDescriptorReg.get
+    huAccepted := delivery.entry.reserve.fire
+    delivery.entry.request.valid := false.B
+    delivery.entry.request.bits := 0.U.asTypeOf(delivery.entry.request.bits)
+    delivery.entry.cancel := 0.U.asTypeOf(delivery.entry.cancel)
+    delivery.entry.completion.ready := false.B
+    delivery.entry.release := false.B
+  }
+
   io.flushOut.valid := (state === s_idle) && deqPtrEntryValid && (intrEnable || deqHasException && (!deqIsVlsException || deqVlsCanCommit) || isFlushPipe) && !lastCycleFlush
   io.flushOut.bits := DontCare
   io.flushOut.bits.isRVC := deqPtrEntry.isRVC
@@ -617,6 +664,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.flushOut.bits.ftqOffset := Mux(needModifyFtqIdxOffset, firstVInstrFtqOffset, deqPtrEntry.ftqOffset)
   io.flushOut.bits.level := Mux(deqHasReplayInst || intrEnable || deqHasException || needModifyFtqIdxOffset, RedirectLevel.flush, RedirectLevel.flushAfter) // TODO use this to implement "exception next"
   io.flushOut.bits.interrupt := true.B
+  io.flushOut.bits.isHUTimer.foreach(_ := huAccepted)
   XSPerfAccumulate("flush_num", io.flushOut.valid)
   XSPerfAccumulate("interrupt_num", io.flushOut.valid && intrEnable)
   XSPerfAccumulate("exception_num", io.flushOut.valid && deqHasException)
@@ -646,6 +694,17 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.exception.bits.isHls := RegEnable(deqPtrEntry.isHls, exceptionHappen)
   io.exception.bits.vls := RegEnable(deqPtrEntry.vls, exceptionHappen)
   io.exception.bits.trigger := RegEnable(exceptionDataRead.bits.trigger, exceptionHappen)
+  io.exception.bits.interruptEvent.foreach(_ := RegEnable(selectedInterruptEvent.get, exceptionHappen))
+  io.csr.userTimerDelivery.foreach { delivery =>
+    delivery.accepted.valid := exceptionHappen && intrEnable
+    delivery.accepted.bits := selectedInterruptEvent.get
+    val selected = selectedInterruptEvent.get.interrupt
+    val incoming = delivery.candidate.bits
+    val sameClaim = (selected.irToHU && incoming.irToHU) ||
+      (selected.nmi && !selected.debug && incoming.nmi && !incoming.debug && selected.cause === incoming.cause) ||
+      (selected.criticalDebug && incoming.criticalDebug && selected.cause === incoming.cause)
+    interruptClaim := delivery.accepted.valid && delivery.candidate.valid && sameClaim
+  }
 
   // data will be one cycle after valid
   io.readGPAMemAddr.valid := exceptionHappen
@@ -754,6 +813,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val traceBlock = io.trace.blockCommit
   val blockCommit = misPredBlock || lastCycleFlush || hasWFI || io.redirect.valid ||
     (deqNeedFlush && !deqHasFlushed) || deqFlushBlock || criticalErrorState || traceBlock
+  huAcceptanceBlocked := misPredBlock || hasWFI || deqFlushBlock || criticalErrorState || traceBlock
 
   io.commits.isWalk := state === s_walk
   io.commits.isCommit := state === s_idle && !blockCommit
@@ -852,7 +912,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   deqPtrGenModule.io.deq_v := commit_vDeqGroup
   deqPtrGenModule.io.deq_w := commit_wDeqGroup
   deqPtrGenModule.io.exception_state := exceptionDataRead
-  deqPtrGenModule.io.intrBitSetReg := intrBitSetReg
+  deqPtrGenModule.io.intrBitSetReg := legacyIntrBitSet
+  deqPtrGenModule.io.huInterrupt.foreach(_ := huAccepted)
   deqPtrGenModule.io.hasNoSpecExec := hasWaitForward
   deqPtrGenModule.io.allowOnlyOneCommit := allowOnlyOneCommit
   deqPtrGenModule.io.interrupt_safe := robDeqGroup(deqPtr.value(bankAddrWidth-1,0)).interrupt_safe
@@ -861,6 +922,11 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   deqPtrGenModule.io.allCommitted := allCommitted
   deqPtrVec := deqPtrGenModule.io.out
   deqPtrVec_next := deqPtrGenModule.io.next_out
+  when(huAccepted) {
+    assert(io.flushOut.valid && io.flushOut.bits.flushItself())
+    assert(!(io.commits.isCommit && io.commits.commitValid.asUInt.orR))
+    assert(deqPtrVec_next.head === deqPtr)
+  }
 
   val enqPtrGenModule = Module(new RobEnqPtrWrapper)
   enqPtrGenModule.io.redirect := io.redirect
@@ -994,6 +1060,18 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val hasExcpSeq = enqHasExcpSeq.lazyZip(robIdxMatchSeq).lazyZip(uopEnqValidSeq).map { case (excp, isMatch, valid) => excp && isMatch && valid }
     val hasExcpFlag = Cat(hasExcpSeq).orR
     val isFirstEnq = !robEntries(i).valid && instCanEnqFlag
+    robEntries(i).huGroupSealed.foreach { sealedGroup =>
+      val lastUopEnqueued = VecInit(uopCanEnqSeq.zip(io.enq.req).map {
+        case (accepted, req) => accepted && req.bits.lastUop
+      }).asUInt.orR
+      when(!io.redirect.valid) {
+        when(isFirstEnq) {
+          sealedGroup := lastUopEnqueued
+        }.elsewhen(robEntries(i).valid && lastUopEnqueued) {
+          sealedGroup := true.B
+        }
+      }
+    }
     val realDestEnqNum = PopCount(enqNeedWriteRFSeq.zip(uopCanEnqSeq).map { case (writeFlag, valid) => writeFlag && valid })
     when(isFirstEnq){
       robEntries(i).realDestSize := realDestEnqNum //Mux(hasExcpFlag, 0.U, realDestEnqNum)
@@ -1067,6 +1145,18 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val uopCanEnqSeq = uopEnqValidSeq.zip(robIdxMatchSeq).map { case (valid, isMatch) => valid && isMatch }
     val instCanEnqSeq = instEnqValidSeq.zip(robIdxMatchSeq).map { case (valid, isMatch) => valid && isMatch }
     val instCanEnqFlag = Cat(instCanEnqSeq).orR
+    needUpdate(i).huGroupSealed.foreach { sealedGroup =>
+      val lastUopEnqueued = VecInit(uopCanEnqSeq.zip(io.enq.req).map {
+        case (accepted, req) => accepted && req.bits.lastUop
+      }).asUInt.orR
+      when(!io.redirect.valid) {
+        when(!needUpdate(i).valid && instCanEnqFlag) {
+          sealedGroup := lastUopEnqueued
+        }.elsewhen(needUpdate(i).valid && lastUopEnqueued) {
+          sealedGroup := true.B
+        }
+      }
+    }
     val realDestEnqNum = PopCount(enqNeedWriteRFSeq.zip(uopCanEnqSeq).map { case (writeFlag, valid) => writeFlag && valid })
     when(!needUpdate(i).valid && instCanEnqFlag) {
       needUpdate(i).realDestSize := realDestEnqNum
@@ -1256,6 +1346,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   for (i <- 0 until CommitWidth) {
     traceBlocks(i).bits.ftqIdx.foreach(_ := rawInfo(i).ftqIdx)
     traceBlocks(i).bits.ftqOffset.foreach(_ := rawInfo(i).ftqOffset)
+    traceBlocks(i).bits.huTimer.foreach(_ := false.B)
     traceBlockInPipe(i).itype := rawInfo(i).traceBlockInPipe.itype
     traceBlockInPipe(i).iretire := rawInfo(i).traceBlockInPipe.iretire
     traceBlockInPipe(i).ilastsize := rawInfo(i).traceBlockInPipe.ilastsize
@@ -1264,7 +1355,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     if(i == 0) {
       when(isTraceXret && io.commits.isCommit && io.commits.commitValid(0)){ // trace xret
         traceBlocks(i).bits.tracePipe.itype := Itype.ExpIntReturn
-      }.elsewhen(io.exception.valid){ // trace exception
+      }.elsewhen(io.exception.valid && !io.exception.bits.interruptEvent.map(_.interrupt.irToHU).getOrElse(false.B)){ // trace exception
         traceBlocks(i).bits.tracePipe.itype := Mux(io.exception.bits.isInterrupt,
           Itype.Interrupt,
           Itype.Exception

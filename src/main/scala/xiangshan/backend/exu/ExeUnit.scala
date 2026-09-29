@@ -377,6 +377,7 @@ class ExeUnitImp(
   io.out.bits.v0Wen.foreach(x => x := Mux1H(fuOutValidOH, fuV0WenVec))
   io.out.bits.vlWen.foreach(x => x := Mux1H(fuOutValidOH, fuVlWenVec))
   io.out.bits.redirect.foreach(x => x := Mux1H((fuOutValidOH zip fuRedirectVec).filter(_._2.isDefined).map(x => (x._1, x._2.get))))
+  io.out.bits.redirect.foreach(_.bits.isHUTimer.foreach(_ := false.B))
   io.out.bits.fflags.foreach(x => x := Mux1H(fuOutValidOH, fuOutresVec.map(_.fflags.getOrElse(0.U.asTypeOf(io.out.bits.fflags.get)))))
   io.out.bits.wflags.foreach(x => x := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.fpu.getOrElse(0.U.asTypeOf(new FPUCtrlSignals)).wflags)))
   io.out.bits.vxsat.foreach(x => x := Mux1H(fuOutValidOH, fuOutresVec.map(_.vxsat.getOrElse(0.U.asTypeOf(io.out.bits.vxsat.get)))))
@@ -390,6 +391,22 @@ class ExeUnitImp(
       exuio <> fuio
       fuio.exception := DelayN(exuio.exception, 2)
       fuio.robDeqPtr := DelayN(exuio.robDeqPtr, 2)
+      if (HasUserTimerInterrupt) {
+        // The PC retains the existing two-stage transport latency. Reservation and
+        // cancellation bypass it; a canceled transaction still needs its PC to replay.
+        val source = exuio.userTimerDelivery.get.entry.request
+        val sink = fuio.userTimerDelivery.get.entry.request
+        val pcStage1 = Module(new Queue(new xiangshan.backend.fu.NewCSR.CSREvents.HUEntryRequest,
+          entries = 1, pipe = true, flow = false))
+        val pcStage2 = Module(new Queue(new xiangshan.backend.fu.NewCSR.CSREvents.HUEntryRequest,
+          entries = 1, pipe = true, flow = false))
+        pcStage1.io.enq <> source
+        pcStage2.io.enq <> pcStage1.io.deq
+        sink <> pcStage2.io.deq
+        when(exuio.userTimerDelivery.get.entry.release) {
+          assert(!pcStage1.io.deq.valid && !pcStage2.io.deq.valid)
+        }
+      }
   }))
   io.csrin.foreach(exuio => funcUnits.foreach(fu => fu.io.csrin.foreach{fuio => fuio := exuio}))
   io.csrToDecode.foreach(toDecode => funcUnits.foreach(fu => fu.io.csrToDecode.foreach(fuOut => toDecode := fuOut)))

@@ -58,11 +58,35 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   private val isMNret  = CSROpType.isSystemOp(func) && addr === privMNret
   private val isMret   = CSROpType.isSystemOp(func) && addr === privMret
   private val isSret   = CSROpType.isSystemOp(func) && addr === privSret
+  private val isUret   = CSROpType.isSystemOp(func) && addr === privUret
   private val isDret   = CSROpType.isSystemOp(func) && addr === privDret
   private val isWfi    = CSROpType.isWfi(func)
   private val isCSRAcc = CSROpType.isCsrAccess(func)
 
   val csrMod = Module(new NewCSR)
+  val huEntry = csrIn.userTimerDelivery.map(_.entry)
+  huEntry.foreach { port =>
+    csrMod.io.huEntry.get <> port
+    csrOut.userTimerDelivery.get.candidate := csrMod.io.interruptCandidate.get
+    csrOut.userTimerDelivery.get.candidateKill := csrMod.io.huCandidateKill.get
+    csrMod.io.acceptedInterrupt.get := csrIn.userTimerDelivery.get.accepted
+
+    // Flush provenance distinguishes the reservation's own redirect from a real
+    // older/equal redirect. The saved identity remains live until target release.
+    val reserved = RegInit(false.B)
+    val event = RegEnable(port.reserve.bits, port.reserve.fire)
+    when(port.reserve.fire) { reserved := true.B }
+      .elsewhen(port.release) { reserved := false.B }
+    val sameIdentity = io.flush.bits.robIdx === event.robIdx &&
+      io.flush.bits.ftqIdx === event.ftqIdx && io.flush.bits.ftqOffset === event.ftqOffset
+    val ownFlush = io.flush.bits.isHUTimer.get && sameIdentity
+    val cancelFromFlush = reserved && event.robIdx.needFlush(io.flush) && !ownFlush
+    when(cancelFromFlush && !port.cancel.valid) {
+      csrMod.io.huEntry.get.cancel.valid := true.B
+      csrMod.io.huEntry.get.cancel.bits.event := event
+      csrMod.io.huEntry.get.cancel.bits.externalRedirect := true.B
+    }
+  }
   val trapInstMod = Module(new TrapInstMod)
   val trapTvalMod = Module(new TrapTvalMod)
 
@@ -94,7 +118,10 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
 
   private val robIdxReg = RegEnable(io.in.bits.ctrl.robIdx, io.in.fire)
   private val thisRobIdx = Wire(new RobPtr)
-  when (io.in.valid) {
+  // A stalled return owns its saved ROB identity even if a later input remains valid.
+  private val savedUret = Option.when(HasUserTimerInterrupt)(RegEnable(isUret, false.B, io.in.fire))
+  private val waitingUret = savedUret.getOrElse(false.B) && !csrMod.io.in.ready
+  when (io.in.valid && !waitingUret) {
     thisRobIdx := io.in.bits.ctrl.robIdx
   }.otherwise {
     thisRobIdx := robIdxReg
@@ -114,6 +141,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       in.bits.mnret := isMNret
       in.bits.sret := isSret
       in.bits.dret := isDret
+      in.bits.uret := isUret
       in.bits.redirectFlush := redirectFlush
   }
   csrMod.io.trapInst := trapInstMod.io.currentTrapInst
@@ -137,6 +165,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   csrMod.io.fromRob.trap.bits.isHls := csrIn.exception.bits.isHls
   csrMod.io.fromRob.trap.bits.isFetchMalAddr := csrIn.exception.bits.isFetchMalAddr
   csrMod.io.fromRob.trap.bits.isForVSnonLeafPTE := csrIn.exception.bits.isForVSnonLeafPTE
+  csrMod.io.fromRob.trap.bits.interruptEvent.foreach(_ := csrIn.exception.bits.interruptEvent.get)
 
   csrMod.io.fromRob.commit.fflags := setFflags
   csrMod.io.fromRob.commit.fsDirty := setFsDirty
@@ -200,6 +229,9 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   trapTvalMod.io.clear := csrIn.exception.valid && csrIn.exception.bits.isFetchMalAddr
   trapTvalMod.io.fromCtrlBlock.flush := io.flush
   trapTvalMod.io.fromCtrlBlock.robDeqPtr := io.csrio.get.robDeqPtr
+  csrMod.io.status.userTargetIdentity.foreach { identity =>
+    when(identity.valid) { trapTvalMod.io.fromCtrlBlock.robDeqPtr := identity.bits.robIdx }
+  }
 
   val imsic = Module(new aia.IMSIC(soc.IMSICParams))
   imsic.fromCSR.addr.valid := csrMod.toAIA.addr.valid
@@ -288,7 +320,10 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   /** initialize NewCSR's io_out_ready from wrapper's io */
   csrMod.io.out.ready := io.out.ready
 
-  io.out.bits.res.redirect.get.valid := io.out.valid && RegEnable(isXRet, false.B, io.in.fire)
+  val legacyReturn = RegEnable(isXRet, false.B, io.in.fire)
+  io.out.bits.res.redirect.get.valid := io.out.valid && (if (HasUserTimerInterrupt) {
+    Mux(savedUret.get, csrMod.io.out.bits.userReturnRedirect, legacyReturn)
+  } else legacyReturn)
   val redirect = io.out.bits.res.redirect.get.bits
   redirect := 0.U.asTypeOf(redirect)
   redirect.level := RedirectLevel.flushAfter
@@ -297,10 +332,12 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   redirect.ftqOffset := RegEnable(io.in.bits.ctrl.ftqOffset.get, io.in.fire)
   redirect.cfiUpdate.predTaken := true.B
   redirect.cfiUpdate.taken := true.B
-  redirect.cfiUpdate.target := csrMod.io.out.bits.targetPc.pc
-  redirect.cfiUpdate.backendIPF := csrMod.io.out.bits.targetPc.raiseIPF
-  redirect.cfiUpdate.backendIAF := csrMod.io.out.bits.targetPc.raiseIAF
-  redirect.cfiUpdate.backendIGPF := csrMod.io.out.bits.targetPc.raiseIGPF
+  val returnTarget = if (HasUserTimerInterrupt) Mux(csrMod.io.out.bits.userReturnRedirect,
+    csrMod.io.out.bits.userReturnTarget, csrMod.io.out.bits.targetPc) else csrMod.io.out.bits.targetPc
+  redirect.cfiUpdate.target := returnTarget.pc
+  redirect.cfiUpdate.backendIPF := returnTarget.raiseIPF
+  redirect.cfiUpdate.backendIAF := returnTarget.raiseIAF
+  redirect.cfiUpdate.backendIGPF := returnTarget.raiseIGPF
   // Only mispred will send redirect to frontend
   redirect.cfiUpdate.isMisPred := true.B
 
@@ -315,7 +352,9 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   csrOut.vpu.vstart := csrMod.io.status.vecState.vstart.asUInt
   csrOut.vpu.vxrm   := csrMod.io.status.vecState.vxrm.asUInt
 
-  csrOut.isXRet := isXRet
+  csrOut.isXRet := (if (HasUserTimerInterrupt) {
+    (io.in.fire && isXRet && !isUret) || (io.out.fire && csrMod.io.out.bits.userReturnRedirect)
+  } else isXRet)
 
   csrOut.trapTarget := csrMod.io.out.bits.targetPc
   csrOut.interrupt := csrMod.io.status.interrupt

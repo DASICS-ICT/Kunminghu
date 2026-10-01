@@ -107,7 +107,7 @@ object production extends ProductionModule {
       os.Path(environment("UIT05_CANDIDATE_ROOT"))
     }
     override def sources = T.sources {
-      Seq("top/SimTop.scala", "top/SimMMIO.scala",
+      Seq("top/SimTop.scala", "top/SimMMIO.scala", "top/DasicsDevelopmentMain.scala",
         "xiangshan/backend/fu/UserTimerBaremetalMain.scala",
         "xiangshan/backend/fu/UserTimerReferenceObserver.scala",
         "xiangshan/backend/fu/UserTimerReferenceMain.scala",

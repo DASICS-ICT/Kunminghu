@@ -15,6 +15,45 @@ import java.nio.file.{Files, Paths}
 import scala.collection.mutable
 import scala.util.Random
 
+// Local bus adapter only. Architectural state and map entries are the real
+// production instance group; the future NewCSR will perform unified dispatch.
+class FDIMainCfgTestWrite extends Bundle {
+  val address = UInt(12.W)
+  val data = UInt(64.W)
+}
+
+class FDIMainCfgMapTestHarness(implicit p: Parameters) extends Module with RequireSyncReset {
+  val io = IO(new Bundle {
+    val readAddress = Input(UInt(12.W))
+    val readEnable = Input(Bool())
+    val readHit = Output(Bool())
+    val readData = Output(UInt(64.W))
+    val rmwData = Output(UInt(64.W))
+    val write = Flipped(Valid(new FDIMainCfgTestWrite))
+    val writeCancel = Input(Bool())
+    val sView = Output(UInt(64.W))
+    val uView = Output(UInt(64.W))
+    val writeApplied = Output(Bool())
+  })
+  private val registers = new FDIMainCfgBank
+  require(registers.csrMods.size == 1)
+  require(registers.csrRwMap.size == 2 && registers.csrOutMap.keySet == registers.csrRwMap.keySet)
+  private val readSelect = registers.csrRwMap.keys.toSeq.map(io.readAddress === _.U)
+  private val writeSelect = registers.csrRwMap.keys.toSeq.map(io.write.bits.address === _.U)
+  io.readHit := VecInit(readSelect).asUInt.orR
+  io.readData := Mux(io.readEnable, Mux1H(readSelect, registers.csrRwMap.values.toSeq.map(_._2)), 0.U)
+  io.rmwData := Mux1H(registers.csrOutMap.toSeq.map { case (address, data) =>
+    (io.readAddress === address.U) -> data
+  })
+  io.writeApplied := io.write.valid && VecInit(writeSelect).asUInt.orR && !io.writeCancel && !reset.asBool
+  registers.csrRwMap.toSeq.zip(writeSelect).foreach { case ((_, (port, _)), selected) =>
+    port.wen := io.writeApplied && selected
+    port.wdata := io.write.bits.data
+  }
+  io.sView := registers.mainCfg.rdata
+  io.uView := registers.mainCfg.uRdata
+}
+
 // This adapter exercises the bank's consumer contract; it is not the production
 // CSR wrapper, instruction decoder, permission policy, or retirement machinery.
 class FDIMainCfgTestRequest extends Bundle {
@@ -47,7 +86,7 @@ class FDIMainCfgCSRTestAdapter(implicit p: Parameters) extends Module with Requi
     val writeApplied = Output(Bool())
   })
 
-  val bank = Module(new FDIMainCfgBank)
+  val bank = Module(new FDIMainCfgMapTestHarness)
   val idle :: commit :: respond :: Nil = Enum(3)
   val state = RegInit(idle)
   // Address, data, authority, and response are captured together at acceptance.
@@ -70,7 +109,7 @@ class FDIMainCfgCSRTestAdapter(implicit p: Parameters) extends Module with Requi
   bank.io.readAddress := request.address
   bank.io.readEnable := io.request.fire && permitted && wantsRead
   val finalData = Mux(replace, source,
-    Mux(request.operation(1, 0) === 2.U, bank.io.readData | source, bank.io.readData & ~source))
+    Mux(request.operation(1, 0) === 2.U, bank.io.rmwData | source, bank.io.rmwData & ~source))
   bank.io.write.valid := state === commit && savedWrite && !stopped
   bank.io.write.bits.address := savedAddress
   bank.io.write.bits.data := savedData
@@ -147,7 +186,7 @@ class FDIMainCfgBankTest extends AnyFlatSpec with ChiselScalatestTester {
     val directTrace = Files.newBufferedWriter(runRoot.resolve("bank-trace.csv"), StandardCharsets.UTF_8)
     directTrace.write("cycle,category,address,data,valid,cancel,reset,readAddress,readEnable,readHit,writeApplied,before,after\n")
     try {
-      test(new FDIMainCfgBank).withAnnotations(Seq(
+      test(new FDIMainCfgMapTestHarness).withAnnotations(Seq(
         VerilatorBackendAnnotation, TargetDirAnnotation("rtl-maincfg-bank")
       )) { dut =>
         var backing = Vector.fill(11)(false)
@@ -167,6 +206,7 @@ class FDIMainCfgBankTest extends AnyFlatSpec with ChiselScalatestTester {
           val applied = valid && !cancel && !reset && visible(address).nonEmpty
           withClue(s"direct cycle=$directCycles category=$name address=$address data=$data: ") {
             dut.io.readHit.expect(hit.B)
+            dut.io.rmwData.expect(view(backing, readAddress).U)
             dut.io.readData.expect((if (readEnable) view(backing, readAddress) else BigInt(0)).U)
             dut.io.sView.expect(before.U)
             dut.io.uView.expect(view(backing, 0x9E1).U)

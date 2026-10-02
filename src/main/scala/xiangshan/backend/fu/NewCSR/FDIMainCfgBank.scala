@@ -3,7 +3,7 @@
 package xiangshan.backend.fu.NewCSR
 
 import chisel3._
-import chisel3.util.Valid
+import scala.collection.immutable.SeqMap
 import org.chipsalliance.cde.config.Parameters
 import xiangshan.backend.fu.NewCSR.CSRDefines.{CSRRWField => RW}
 
@@ -60,43 +60,20 @@ class FDIMainCfgModule(implicit override val p: Parameters)
   uRdata := uFields.asUInt
 }
 
-class FDIMainCfgWrite extends Bundle {
-  val address = UInt(12.W)
-  val data = UInt(64.W)
-}
+// An instance group in the caller's Module context, following the native CSR
+// maps. Only FDIMainCfgModule owns architectural state. This group adds neither
+// an address bus nor read/write dispatch; production integration belongs to C05.
+class FDIMainCfgBank(implicit p: Parameters) {
+  val mainCfg = Module(new FDIMainCfgModule).setAddr(FDIMainCfgAddress.sMainCfg)
+  val csrMods: Seq[CSRModule[_]] = Seq(mainCfg)
+  require(FDIMainCfgAddress.sMainCfg != FDIMainCfgAddress.uMainCfg)
 
-class FDIMainCfgBank(implicit p: Parameters) extends Module with RequireSyncReset {
-  val io = IO(new Bundle {
-    val readAddress = Input(UInt(12.W))
-    // Read enable and write valid are already authorized by the caller.
-    val readEnable = Input(Bool())
-    val readHit = Output(Bool())
-    val readData = Output(UInt(64.W))
-    val write = Flipped(Valid(new FDIMainCfgWrite))
-    val writeCancel = Input(Bool())
-    // Internal state views are combinational and do not authorize CSR access.
-    val sView = Output(UInt(64.W))
-    val uView = Output(UInt(64.W))
-    val writeApplied = Output(Bool())
-  })
-
-  private val mainCfg = Module(new FDIMainCfgModule)
-  private val readS = io.readAddress === FDIMainCfgAddress.sMainCfg.U(12.W)
-  private val readU = io.readAddress === FDIMainCfgAddress.uMainCfg.U(12.W)
-  private val writeS = io.write.bits.address === FDIMainCfgAddress.sMainCfg.U(12.W)
-  private val writeU = io.write.bits.address === FDIMainCfgAddress.uMainCfg.U(12.W)
-
-  // One valid pulse describes one edge's write, including a same-value write.
-  // Address, data, permission and cancellation must belong to that transaction;
-  // this bank neither queues requests nor repeats the upstream RW/RS/RC operation.
-  io.writeApplied := io.write.valid && (writeS || writeU) && !io.writeCancel && !reset.asBool
-  mainCfg.w.wen := io.writeApplied && writeS
-  mainCfg.w.wdata := io.write.bits.data
-  mainCfg.wAliasUMainCfg.wen := io.writeApplied && writeU
-  mainCfg.wAliasUMainCfg.wdata := io.write.bits.data
-
-  io.sView := mainCfg.rdata
-  io.uView := mainCfg.uRdata
-  io.readHit := readS || readU
-  io.readData := Mux(io.readEnable && io.readHit, Mux(readS, mainCfg.rdata, mainCfg.uRdata), 0.U)
+  val csrRwMap: SeqMap[Int, (CSRAddrWriteBundle[_], UInt)] = SeqMap(
+    FDIMainCfgAddress.sMainCfg -> (mainCfg.w, mainCfg.rdata),
+    FDIMainCfgAddress.uMainCfg -> (mainCfg.wAliasUMainCfg, mainCfg.uRdata)
+  )
+  val csrOutMap: SeqMap[Int, UInt] = SeqMap(
+    FDIMainCfgAddress.sMainCfg -> mainCfg.regOut.asUInt,
+    FDIMainCfgAddress.uMainCfg -> mainCfg.uRdata
+  )
 }

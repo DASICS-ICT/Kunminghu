@@ -11,9 +11,9 @@ import xiangshan.backend.fu.NewCSR.InterruptNO
 import xiangshan.backend.fu.NewCSR.CSREvents.InterruptDescriptor
 
 
-class InterruptFilter(hasUserTimerInterrupt: Boolean = false) extends Module {
-  val io = IO(new InterruptFilterIO(hasUserTimerInterrupt))
-  val candidateStages = Option.when(hasUserTimerInterrupt)(
+class InterruptFilter(hasFDI: Boolean = false) extends Module {
+  val io = IO(new InterruptFilterIO(hasFDI))
+  val candidateStages = Option.when(hasFDI)(
     RegInit(VecInit(Seq.fill(6)(0.U.asTypeOf(Valid(new InterruptDescriptor))))))
 
   val privState = io.in.privState
@@ -523,7 +523,7 @@ class InterruptFilter(hasUserTimerInterrupt: Boolean = false) extends Module {
   val vsIRModeCond = privState.isModeVS && vsstatusSIE || privState < PrivState.ModeVS
   val SelectCandidate5 = onlyC5Enable || C3C5Enable ||
                          C1C5Enable && (iprioC1 === iprioC2C5 && !hvictl.DPR.asBool || iprioC1 > iprioC2C5)
-  if (hasUserTimerInterrupt) {
+  if (hasFDI) {
     val raw = Wire(Valid(new InterruptDescriptor))
     val higherPending = intrVec.orR || enableDebugIntr || (vsIRModeCond && SelectCandidate5)
     val huSelected = io.in.huCandidate.get && !higherPending && !io.in.huCandidateKill.get
@@ -610,16 +610,16 @@ class InterruptFilter(hasUserTimerInterrupt: Boolean = false) extends Module {
   dontTouch(vsIRVec)
 }
 
-class InterruptFilterIO(hasUserTimerInterrupt: Boolean = false) extends Bundle {
+class InterruptFilterIO(hasFDI: Boolean = false) extends Bundle {
   val in = Input(new Bundle {
-    val huCandidate = Option.when(hasUserTimerInterrupt)(Bool())
-    val huCandidateKill = Option.when(hasUserTimerInterrupt)(Bool())
-    val huClaim = Option.when(hasUserTimerInterrupt)(Bool())
-    val nmiInFlight = Option.when(hasUserTimerInterrupt)(Valid(UInt(8.W)))
-    val nmiClaim = Option.when(hasUserTimerInterrupt)(Valid(UInt(8.W)))
-    val criticalDebug = Option.when(hasUserTimerInterrupt)(Bool())
-    val criticalDebugInFlight = Option.when(hasUserTimerInterrupt)(Bool())
-    val criticalDebugClaim = Option.when(hasUserTimerInterrupt)(Bool())
+    val huCandidate = Option.when(hasFDI)(Bool())
+    val huCandidateKill = Option.when(hasFDI)(Bool())
+    val huClaim = Option.when(hasFDI)(Bool())
+    val nmiInFlight = Option.when(hasFDI)(Valid(UInt(8.W)))
+    val nmiClaim = Option.when(hasFDI)(Valid(UInt(8.W)))
+    val criticalDebug = Option.when(hasFDI)(Bool())
+    val criticalDebugInFlight = Option.when(hasFDI)(Bool())
+    val criticalDebugClaim = Option.when(hasFDI)(Bool())
     val privState = new PrivState
     val mstatusMIE  = Bool()
     val sstatusSIE  = Bool()
@@ -662,8 +662,8 @@ class InterruptFilterIO(hasUserTimerInterrupt: Boolean = false) extends Bundle {
   })
 
   val out = Output(new Bundle {
-    val candidate = Option.when(hasUserTimerInterrupt)(Valid(new InterruptDescriptor))
-    val higherPriority = Option.when(hasUserTimerInterrupt)(Bool())
+    val candidate = Option.when(hasFDI)(Valid(new InterruptDescriptor))
+    val higherPriority = Option.when(hasFDI)(Bool())
     val debug = Bool()
     val nmi = Bool()
     val interruptVec = ValidIO(UInt(8.W))

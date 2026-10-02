@@ -17,15 +17,13 @@ class UserTimerCycleSimTop(implicit p: Parameters) extends UserTimerReferenceSim
 
 object UserTimerCycleMain extends App {
   require(sys.env.get("UIT07_PROTOCOL_VERSION").contains("1"), "UIT07_PROTOCOL_VERSION must be 1")
+  // Preserve this legacy fixture input as an explicit mapping to the sole production feature.
   val enabled = sys.env.get("UIT07_USER_TIMER") match {
     case Some("1") => true
     case Some("0") => false
     case _ => throw new IllegalArgumentException("UIT07_USER_TIMER must be 0 or 1")
   }
-  val (base, firrtlOpts, firtoolOpts) = top.ArgParser.parse(args)
-  val config = base.alterPartial {
-    case XSTileKey => base(XSTileKey).map(_.copy(HasUserTimerInterrupt = enabled))
-  }
+  val (config, firrtlOpts, firtoolOpts) = top.ArgParser.parse(args ++ Array("--has-fdi", enabled.toString))
   require(config(XSTileKey).size == 1)
   val options = config(DebugOptionsKey)
   require(!options.FPGAPlatform && options.EnableDifftest)

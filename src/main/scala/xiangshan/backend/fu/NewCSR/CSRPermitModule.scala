@@ -78,7 +78,7 @@ class CSRPermitModule(implicit val p: Parameters) extends Module with HasXSParam
 
   // All host user timer CSRs share custom-state permission, including the legacy U addresses.
   // Guest access is always illegal and must suppress writes before the legal-write result is formed.
-  private val userTimerPermit_EX_II = if (HasUserTimerInterrupt) {
+  private val userTimerPermit_EX_II = if (HasFDI) {
     val addr = io.in.csrAccess.addr
     val privState = io.in.privState
     val isUserTimerCSR = UserTimerCSRAddress.all.map(csr => addr === csr.U).reduce(_ || _)

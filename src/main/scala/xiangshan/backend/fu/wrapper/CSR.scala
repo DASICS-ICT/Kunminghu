@@ -119,7 +119,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   private val robIdxReg = RegEnable(io.in.bits.ctrl.robIdx, io.in.fire)
   private val thisRobIdx = Wire(new RobPtr)
   // A stalled return owns its saved ROB identity even if a later input remains valid.
-  private val savedUret = Option.when(HasUserTimerInterrupt)(RegEnable(isUret, false.B, io.in.fire))
+  private val savedUret = Option.when(HasFDI)(RegEnable(isUret, false.B, io.in.fire))
   private val waitingUret = savedUret.getOrElse(false.B) && !csrMod.io.in.ready
   when (io.in.valid && !waitingUret) {
     thisRobIdx := io.in.bits.ctrl.robIdx
@@ -321,7 +321,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   csrMod.io.out.ready := io.out.ready
 
   val legacyReturn = RegEnable(isXRet, false.B, io.in.fire)
-  io.out.bits.res.redirect.get.valid := io.out.valid && (if (HasUserTimerInterrupt) {
+  io.out.bits.res.redirect.get.valid := io.out.valid && (if (HasFDI) {
     Mux(savedUret.get, csrMod.io.out.bits.userReturnRedirect, legacyReturn)
   } else legacyReturn)
   val redirect = io.out.bits.res.redirect.get.bits
@@ -332,7 +332,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   redirect.ftqOffset := RegEnable(io.in.bits.ctrl.ftqOffset.get, io.in.fire)
   redirect.cfiUpdate.predTaken := true.B
   redirect.cfiUpdate.taken := true.B
-  val returnTarget = if (HasUserTimerInterrupt) Mux(csrMod.io.out.bits.userReturnRedirect,
+  val returnTarget = if (HasFDI) Mux(csrMod.io.out.bits.userReturnRedirect,
     csrMod.io.out.bits.userReturnTarget, csrMod.io.out.bits.targetPc) else csrMod.io.out.bits.targetPc
   redirect.cfiUpdate.target := returnTarget.pc
   redirect.cfiUpdate.backendIPF := returnTarget.raiseIPF
@@ -352,7 +352,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   csrOut.vpu.vstart := csrMod.io.status.vecState.vstart.asUInt
   csrOut.vpu.vxrm   := csrMod.io.status.vecState.vxrm.asUInt
 
-  csrOut.isXRet := (if (HasUserTimerInterrupt) {
+  csrOut.isXRet := (if (HasFDI) {
     (io.in.fire && isXRet && !isUret) || (io.out.fire && csrMod.io.out.bits.userReturnRedirect)
   } else isXRet)
 

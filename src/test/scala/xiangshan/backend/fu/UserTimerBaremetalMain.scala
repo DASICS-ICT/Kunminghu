@@ -21,7 +21,7 @@ class UserTimerBaremetalSimTop(implicit p: Parameters) extends top.SimTop {
   require(debugOpts.EnableDifftest && !debugOpts.FPGAPlatform)
 
   private val core = l_soc.core_with_l2.head.core
-  require(core.coreParams.HasUserTimerInterrupt && core.coreParams.HasVPU && core.coreParams.VLEN == 128)
+  require(core.coreParams.HasFDI && core.coreParams.HasVPU && core.coreParams.VLEN == 128)
   private val backend = core.backend.module
   private val ctrl = core.backend.inner.ctrlBlock.module
   private val rob = core.backend.inner.ctrlBlock.rob.module
@@ -217,10 +217,8 @@ class UserTimerBaremetalSimTop(implicit p: Parameters) extends top.SimTop {
 }
 
 object UserTimerBaremetalMain extends App {
-  val (base, firrtlOpts, firtoolOpts) = top.ArgParser.parse(args)
-  val config = base.alterPartial {
-    case XSTileKey => base(XSTileKey).map(_.copy(HasUserTimerInterrupt = true))
-  }
+  // This legacy fixture requires the sole production feature; duplicate selections are rejected by the parser.
+  val (config, firrtlOpts, firtoolOpts) = top.ArgParser.parse(args ++ Array("--has-fdi", "true"))
   require(config(XSTileKey).size == 1)
   val options = config(DebugOptionsKey)
   require(!options.FPGAPlatform && options.EnableDifftest)

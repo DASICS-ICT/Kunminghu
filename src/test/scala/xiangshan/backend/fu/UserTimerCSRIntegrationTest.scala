@@ -11,6 +11,8 @@ import org.chipsalliance.cde.config.Parameters
 import org.scalatest.flatspec.AnyFlatSpec
 import xiangshan._
 import xiangshan.backend.decode.Imm_Z
+import xiangshan.backend.fu.NewCSR.{CSRBundle, TrapHandleModule}
+import xiangshan.backend.fu.NewCSR.CSRBundles.PrivState
 import xiangshan.backend.fu.wrapper.CSR
 
 // Observation ports expose existing production IO without adding architectural state or overrides.
@@ -42,6 +44,7 @@ class UserTimerCSRIntegrationHarness(implicit p: Parameters) extends Module {
       val data = UInt(64.W)
       val illegal = Bool()
       val virtualIllegal = Bool()
+      val exceptionCause = UInt(64.W)
     })
     val flush = Input(Bool())
     val trap = Input(Bool())
@@ -76,6 +79,20 @@ class UserTimerCSRIntegrationHarness(implicit p: Parameters) extends Module {
   io.response.bits.data := csr.io.out.bits.res.data
   io.response.bits.illegal := csr.io.out.bits.ctrl.exceptionVec.get(ExceptionNO.illegalInstr)
   io.response.bits.virtualIllegal := csr.io.out.bits.ctrl.exceptionVec.get(ExceptionNO.virtualInstr)
+  // Raw absence and guest-permission flags may coexist; use the production selector for the final cause.
+  val trapSelection = Module(new TrapHandleModule)
+  // Typed reset values keep status XLEN fields at RV64; zero is not a legal XLEN encoding.
+  trapSelection.io.in.elements.values.foreach {
+    case bundle: CSRBundle => bundle := bundle.cloneType.init
+    case input => input := 0.U.asTypeOf(input)
+  }
+  trapSelection.io.in.privState := PrivState.ModeM
+  trapSelection.io.in.mstatus.MDT := 0.U
+  trapSelection.io.in.mstatus.SDT := 0.U
+  trapSelection.io.in.vsstatus.SDT := 0.U
+  trapSelection.io.in.trapInfo.valid := csr.io.out.valid
+  trapSelection.io.in.trapInfo.bits.trapVec := csr.io.out.bits.ctrl.exceptionVec.get.asUInt
+  io.response.bits.exceptionCause := trapSelection.io.out.causeNO.ExceptionCode.asUInt
   csr.io.flush.valid := io.flush
   csr.io.flush.bits.level := RedirectLevel.flush
   csr.io.csrio.get.exception.valid := io.trap || io.debugTrap
@@ -96,6 +113,9 @@ class UserTimerCSRIntegrationTest extends AnyFlatSpec with ChiselScalatestTester
 
   private val allOnes = (BigInt(1) << 64) - 1
   private val addresses = Seq(0x000, 0x004, 0x005, 0x040, 0x041, 0x042, 0x043, 0x044, 0x800)
+  // Enumerate the frozen architectural address views independently of the production CSR map.
+  private val fdiAddresses = Seq(0xbc4, 0xbc5, 0xbc6, 0x9e1, 0x9e2, 0x9e3, 0x880) ++
+    (0x890 to 0x8af) ++ (0x8b0 to 0x8b3) ++ (0x8c0 to 0x8c8)
   private val masks = Map(0x000 -> BigInt(0x11), 0x004 -> BigInt(0x10),
     0x005 -> (allOnes ^ 3), 0x040 -> allOnes, 0x041 -> (allOnes ^ 1),
     0x042 -> allOnes, 0x043 -> allOnes)
@@ -105,7 +125,7 @@ class UserTimerCSRIntegrationTest extends AnyFlatSpec with ChiselScalatestTester
   private def parameters(enabled: Boolean): Parameters = {
     val base = new top.DefaultConfig
     base.alterPartial {
-      case XSCoreParamsKey => base(XSTileKey).head.copy(HasUserTimerInterrupt = enabled)
+      case XSCoreParamsKey => base(XSTileKey).head.copy(HasFDI = enabled)
       case DebugOptionsKey => base(DebugOptionsKey).copy(FPGAPlatform = true,
         EnableDifftest = false, AlwaysBasicDiff = false, EnablePerfDebug = false,
         EnableChiselDB = false, AlwaysBasicDB = false)
@@ -198,7 +218,7 @@ class UserTimerCSRIntegrationTest extends AnyFlatSpec with ChiselScalatestTester
     def access(addr: Int, function: Int = 2, rs1: Int = 0, source: BigInt = 0,
       rd: Int = 1, illegal: Boolean = false, stalls: Int = 0,
       idleAddress: Option[Int] = None, flushRequest: Boolean = false, flushWrite: Boolean = false,
-      noAia: Boolean = false): BigInt = {
+      noAia: Boolean = false, virtualIllegal: Boolean = false): BigInt = {
       dut.io.request.ready.expect(true.B)
       driveInstruction(addr, function, rs1, rd, source)
       dut.io.request.valid.poke(true.B)
@@ -225,7 +245,8 @@ class UserTimerCSRIntegrationTest extends AnyFlatSpec with ChiselScalatestTester
       val result = dut.io.response.bits.data.peek().litValue
       if (!flushRequest && !flushWrite) {
         dut.io.response.bits.illegal.expect(illegal.B)
-        dut.io.response.bits.virtualIllegal.expect(false.B)
+        dut.io.response.bits.virtualIllegal.expect(virtualIllegal.B)
+        if (illegal) dut.io.response.bits.exceptionCause.expect(2.U)
         if (enabled && !illegal && rd != 0 && addr == 0x800) assert(result == oldTimer)
         if (enabled && !illegal && rd != 0 && addr == 0x044) assert(result == (if (oldPending) BigInt(0x10) else BigInt(0)))
       }
@@ -239,6 +260,8 @@ class UserTimerCSRIntegrationTest extends AnyFlatSpec with ChiselScalatestTester
         dut.io.response.valid.expect(true.B)
         dut.io.response.bits.data.expect(result.U)
         dut.io.response.bits.illegal.expect(illegal.B)
+        dut.io.response.bits.virtualIllegal.expect(virtualIllegal.B)
+        if (illegal) dut.io.response.bits.exceptionCause.expect(2.U)
         edge()
       }
       if (stalls > 0) {
@@ -250,10 +273,11 @@ class UserTimerCSRIntegrationTest extends AnyFlatSpec with ChiselScalatestTester
       result
     }
 
-    def write(addr: Int, value: BigInt, illegal: Boolean = false): Unit =
-      access(addr, function = 1, rs1 = 1, source = value, illegal = illegal)
+    def write(addr: Int, value: BigInt, illegal: Boolean = false, virtualIllegal: Boolean = false): Unit =
+      access(addr, function = 1, rs1 = 1, source = value, illegal = illegal, virtualIllegal = virtualIllegal)
 
-    def read(addr: Int, illegal: Boolean = false): BigInt = access(addr, illegal = illegal)
+    def read(addr: Int, illegal: Boolean = false, virtualIllegal: Boolean = false): BigInt =
+      access(addr, illegal = illegal, virtualIllegal = virtualIllegal)
 
     def system(instruction: BigInt): Unit = {
       dut.io.request.ready.expect(true.B)
@@ -360,14 +384,21 @@ class UserTimerCSRIntegrationTest extends AnyFlatSpec with ChiselScalatestTester
   }
 
   it should "leave all added CSR accesses unimplemented in every mode when disabled" in run("bank-disabled", enabled = false) { d =>
+    assert(fdiAddresses.size == 52 && fdiAddresses.distinct.size == 52)
+    val ordinaryScratch = BigInt("13579bdf2468ace0", 16)
     for ((name, privilege, virtual) <- modes) {
       d.reset()
+      d.write(0x340, ordinaryScratch)
       d.enableState()
       d.mode(name, privilege, virtual)
-      addresses.foreach { addr =>
-        d.read(addr, illegal = true)
-        d.write(addr, allOnes, illegal = true)
+      (addresses ++ fdiAddresses).foreach { addr =>
+        // The absent supervisor views also set raw EX_VI in VU; EX_II still selects ordinary cause 2.
+        val rawVirtualIllegal = name == "VU" && Seq(0x9e1, 0x9e2, 0x9e3).contains(addr)
+        d.read(addr, illegal = true, virtualIllegal = rawVirtualIllegal)
+        d.write(addr, allOnes, illegal = true, virtualIllegal = rawVirtualIllegal)
       }
+      d.machine()
+      assert(d.read(0x340) == ordinaryScratch)
     }
   }
 

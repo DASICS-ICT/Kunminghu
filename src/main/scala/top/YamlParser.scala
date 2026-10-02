@@ -67,6 +67,12 @@ object YamlParser {
       case Left(value) => throw value
       case Right(value) => value
     }
+    // These fields are not YAML configuration inputs and must not be silently ignored.
+    val unsupportedFeatureKeys = Set("HasFDI", "HasUserTimerInterrupt", "UIT",
+      "CONFIG_RV_USER_TIMER", "CONFIG_DIFFTEST_UIT")
+    val requestedFeatureKeys = json.asObject.toSeq.flatMap(_.keys).filter(unsupportedFeatureKeys)
+    require(requestedFeatureKeys.isEmpty,
+      s"Unsupported feature selection in YAML: ${requestedFeatureKeys.mkString(", ")}; use --has-fdi")
     val yamlConfig = json.as[YamlConfig] match {
       case Left(value) => throw value
       case Right(value) => value

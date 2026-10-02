@@ -39,7 +39,7 @@ trait MachineLevel { self: NewCSR =>
   val mstatus = Module(new MstatusModule)
     .setAddr(CSRs.mstatus)
 
-  val misa = Module(new CSRModule("Misa", new MisaBundle(HasUserTimerInterrupt)))
+  val misa = Module(new CSRModule("Misa", new MisaBundle(HasFDI)))
     .setAddr(CSRs.misa)
 
   println(s"[CSR] supported isa ext: ${misa.bundle.getISAString}")
@@ -559,7 +559,7 @@ class MnstatusBundle extends CSRBundle {
   val MNPP   = PrivMode    (12, 11).withReset(PrivMode.U)
 }
 
-class MisaBundle(val hasUserTimerInterrupt: Boolean = false) extends CSRBundle {
+class MisaBundle(val hasFDI: Boolean = false) extends CSRBundle {
   // Todo: reset with ISA string
   val A = RO( 0).withReset(1.U) // Atomic extension
   val B = RO( 1).withReset(1.U) // B extension
@@ -585,7 +585,7 @@ class MisaBundle(val hasUserTimerInterrupt: Boolean = false) extends CSRBundle {
   val V = RO(21).withReset(1.U) // Vector extension
   val W = RO(22).withReset(0.U) // Reserved
   // The experimental timer CSR bank advertises custom state without claiming N compatibility.
-  val X = RO(23).withReset(hasUserTimerInterrupt.B) // Non-standard extensions present
+  val X = RO(23).withReset(hasFDI.B) // Non-standard extensions present
   val Y = RO(24).withReset(0.U) // Reserved
   val Z = RO(25).withReset(0.U) // Reserved
   val MXL = XLENField(63, 62).withReset(XLENField.XLEN64)

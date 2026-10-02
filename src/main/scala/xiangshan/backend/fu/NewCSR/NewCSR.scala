@@ -131,10 +131,10 @@ class NewCSR(implicit val p: Parameters) extends Module
       val criticalErrorState = Input(Bool())
     })
     val in = Flipped(DecoupledIO(new NewCSRInput))
-    val huEntry = Option.when(HasUserTimerInterrupt)(new HUEntryPort)
-    val interruptCandidate = Option.when(HasUserTimerInterrupt)(Output(Valid(new InterruptDescriptor)))
-    val huCandidateKill = Option.when(HasUserTimerInterrupt)(Output(Bool()))
-    val acceptedInterrupt = Option.when(HasUserTimerInterrupt)(Input(Valid(new InterruptEventIdentity)))
+    val huEntry = Option.when(HasFDI)(new HUEntryPort)
+    val interruptCandidate = Option.when(HasFDI)(Output(Valid(new InterruptDescriptor)))
+    val huCandidateKill = Option.when(HasFDI)(Output(Bool()))
+    val acceptedInterrupt = Option.when(HasFDI)(Input(Valid(new InterruptEventIdentity)))
     val trapInst = Input(ValidIO(UInt(InstWidth.W)))
     val fromMem = Input(new Bundle {
       val excpVA  = UInt(XLEN.W)
@@ -155,7 +155,7 @@ class NewCSR(implicit val p: Parameters) extends Module
         val isHls = Bool()
         val isFetchMalAddr = Bool()
         val isForVSnonLeafPTE = Bool()
-        val interruptEvent = Option.when(HasUserTimerInterrupt)(new InterruptEventIdentity)
+        val interruptEvent = Option.when(HasFDI)(new InterruptEventIdentity)
       })
       val commit = Input(new RobCommitCSR)
       val robDeqPtr = Input(new RobPtr)
@@ -170,10 +170,10 @@ class NewCSR(implicit val p: Parameters) extends Module
     /** Output should be a DecoupledIO, since now CSR writing to integer register file might be blocked (by arbiter) */
     val out = DecoupledIO(new NewCSROutput)
     val status = Output(new Bundle {
-      val userInHandler = Option.when(HasUserTimerInterrupt)(Bool())
-      val userEntryEffect = Option.when(HasUserTimerInterrupt)(Bool())
-      val userReturnEffect = Option.when(HasUserTimerInterrupt)(Bool())
-      val userTargetIdentity = Option.when(HasUserTimerInterrupt)(Valid(new InterruptEventIdentity))
+      val userInHandler = Option.when(HasFDI)(Bool())
+      val userEntryEffect = Option.when(HasFDI)(Bool())
+      val userReturnEffect = Option.when(HasFDI)(Bool())
+      val userTargetIdentity = Option.when(HasFDI)(Valid(new InterruptEventIdentity))
       val privState = new PrivState
       val interrupt = Bool()
       val wfiEvent = Bool()
@@ -251,31 +251,31 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   /* Alias of input valid/ready */
   // The HU slot excludes software execution, including legacy live-valid consumers.
-  private val huBusy = if (HasUserTimerInterrupt) Some(RegInit(false.B)) else None
+  private val huBusy = if (HasFDI) Some(RegInit(false.B)) else None
   // The reservation survives PC transport and terminal backpressure. Only the
   // controller's release, after redirect ownership ends, reopens software issue.
-  private val huPcValid = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
-  private val huFinished = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
-  private val huCanceled = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
-  private val huDebugPending = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
-  private val huTrapFinished = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
-  private val huSaved = Option.when(HasUserTimerInterrupt)(Reg(new UserTrapEventInput))
-  private val huIdentity = Option.when(HasUserTimerInterrupt)(Reg(new InterruptEventIdentity))
-  private val huTrapTarget = Option.when(HasUserTimerInterrupt)(Reg(new TargetPCBundle))
+  private val huPcValid = Option.when(HasFDI)(RegInit(false.B))
+  private val huFinished = Option.when(HasFDI)(RegInit(false.B))
+  private val huCanceled = Option.when(HasFDI)(RegInit(false.B))
+  private val huDebugPending = Option.when(HasFDI)(RegInit(false.B))
+  private val huTrapFinished = Option.when(HasFDI)(RegInit(false.B))
+  private val huSaved = Option.when(HasFDI)(Reg(new UserTrapEventInput))
+  private val huIdentity = Option.when(HasFDI)(Reg(new InterruptEventIdentity))
+  private val huTrapTarget = Option.when(HasFDI)(Reg(new TargetPCBundle))
   // A critical error observed after a terminal effect needs a new precise ROB
   // boundary; it must not reuse the completed HU transaction's recovery PC.
-  private val deferredCriticalDebug = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
-  private val criticalDebugInFlight = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
+  private val deferredCriticalDebug = Option.when(HasFDI)(RegInit(false.B))
+  private val criticalDebugInFlight = Option.when(HasFDI)(RegInit(false.B))
   private val huEligible = WireDefault(false.B)
   private val huCandidateInvalidate = WireDefault(false.B)
   private val huClaim = WireDefault(false.B)
   private val huTakeDebug = WireDefault(false.B)
   private val huCancelNow = WireDefault(false.B)
-  private val userReturnPending = if (HasUserTimerInterrupt) Some(RegInit(false.B)) else None
-  private val userReturnLegal = if (HasUserTimerInterrupt) Some(RegInit(false.B)) else None
+  private val userReturnPending = if (HasFDI) Some(RegInit(false.B)) else None
+  private val userReturnLegal = if (HasFDI) Some(RegInit(false.B)) else None
   private val userEventCancel = WireDefault(false.B)
   private val softwareSlotReady = Wire(Bool())
-  val valid = if (HasUserTimerInterrupt) io.in.valid && softwareSlotReady else io.in.valid
+  val valid = if (HasFDI) io.in.valid && softwareSlotReady else io.in.valid
 
   /* Alias of input signals */
   val wen   = io.in.bits.wen && valid
@@ -354,7 +354,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   val legalMNret = permitMod.io.out.hasLegalMNret
   val legalDret  = permitMod.io.out.hasLegalDret
 
-  private val userTimerAddressHit = if (HasUserTimerInterrupt) {
+  private val userTimerAddressHit = if (HasFDI) {
     UserTimerCSRAddress.all.map(address => addr === address.U).reduce(_ || _)
   } else false.B
   // Bank requests have their own accepted write selection. Do not dispatch their delayed
@@ -408,11 +408,11 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   // interrupt
   val nmip = RegInit(new NonMaskableIRPendingBundle, (new NonMaskableIRPendingBundle).init)
-  private val nmiInFlight = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
-  private val nmiInFlightCause = Option.when(HasUserTimerInterrupt)(Reg(UInt(8.W)))
+  private val nmiInFlight = Option.when(HasFDI)(RegInit(false.B))
+  private val nmiInFlightCause = Option.when(HasFDI)(Reg(UInt(8.W)))
   private val nmiClaim = WireDefault(false.B)
   private val nmiClaimCause = WireDefault(0.U(8.W))
-  if (HasUserTimerInterrupt) {
+  if (HasFDI) {
     val accepted = io.acceptedInterrupt.get
     nmiClaim := accepted.valid && accepted.bits.interrupt.nmi && !accepted.bits.interrupt.debug &&
       !accepted.bits.interrupt.irToHU
@@ -443,8 +443,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     when(nonMaskableIRP.NMI_31) { nmip.NMI_31 := true.B }
   }
 
-  val intrMod = Module(new InterruptFilter(HasUserTimerInterrupt))
-  if (HasUserTimerInterrupt) {
+  val intrMod = Module(new InterruptFilter(HasFDI))
+  if (HasFDI) {
     intrMod.io.in.huCandidate.get := huEligible
     intrMod.io.in.huCandidateKill.get := huCandidateInvalidate
     intrMod.io.in.huClaim.get := huClaim
@@ -488,7 +488,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   intrMod.io.in.miprios := Cat(miregiprios.map(_.rdata).reverse)
   intrMod.io.in.hsiprios := Cat(siregiprios.map(_.rdata).reverse)
   intrMod.io.in.mnstatusNMIE := mnstatus.regOut.NMIE.asBool
-  val selectableNmi = if (HasUserTimerInterrupt) {
+  val selectableNmi = if (HasFDI) {
     nmip.asUInt & ~Mux(nmiInFlight.get, UIntToOH(nmiInFlightCause.get, 64), 0.U(64.W))
   } else nmip.asUInt
   intrMod.io.in.nmi := selectableNmi.orR
@@ -502,7 +502,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   intrMod.io.in.fromAIA.meip := fromAIA.meip
   intrMod.io.in.fromAIA.seip := fromAIA.seip
 
-  if (!HasUserTimerInterrupt) {
+  if (!HasFDI) {
     when(intrMod.io.out.nmi && intrMod.io.out.interruptVec.valid) {
       nmip.NMI_31 := nmip.NMI_31 & !UIntToOH(intrMod.io.out.interruptVec.bits, 64)(NonMaskableIRNO.NMI_31)
       nmip.NMI_43 := nmip.NMI_43 & !UIntToOH(intrMod.io.out.interruptVec.bits, 64)(NonMaskableIRNO.NMI_43)
@@ -516,14 +516,14 @@ class NewCSR(implicit val p: Parameters) extends Module
   val observedInject = RegEnable(intrMod.io.out.virtualInterruptIsHvictlInject, false.B, legacyCapture)
   val observedToHS = RegEnable(intrMod.io.out.irToHS, false.B, legacyCapture)
   val observedToVS = RegEnable(intrMod.io.out.irToVS, false.B, legacyCapture)
-  val useAcceptedInterrupt = HasUserTimerInterrupt.B && hasTrap && trapIsInterrupt
-  val intrVec = if (HasUserTimerInterrupt) Mux(useAcceptedInterrupt, deliveredInterrupt.get.cause, 0.U) else observedIntrVec
-  val debug = if (HasUserTimerInterrupt) useAcceptedInterrupt && deliveredInterrupt.get.debug else observedDebug
-  val nmi = if (HasUserTimerInterrupt) useAcceptedInterrupt && deliveredInterrupt.get.nmi else observedNmi
+  val useAcceptedInterrupt = HasFDI.B && hasTrap && trapIsInterrupt
+  val intrVec = if (HasFDI) Mux(useAcceptedInterrupt, deliveredInterrupt.get.cause, 0.U) else observedIntrVec
+  val debug = if (HasFDI) useAcceptedInterrupt && deliveredInterrupt.get.debug else observedDebug
+  val nmi = if (HasFDI) useAcceptedInterrupt && deliveredInterrupt.get.nmi else observedNmi
   val virtualInterruptIsHvictlInject = Mux(useAcceptedInterrupt,
-    deliveredInterrupt.map(_.virtualInterruptIsHvictlInject).getOrElse(false.B), if (HasUserTimerInterrupt) false.B else observedInject)
-  val irToHS = Mux(useAcceptedInterrupt, deliveredInterrupt.map(_.irToHS).getOrElse(false.B), if (HasUserTimerInterrupt) false.B else observedToHS)
-  val irToVS = Mux(useAcceptedInterrupt, deliveredInterrupt.map(_.irToVS).getOrElse(false.B), if (HasUserTimerInterrupt) false.B else observedToVS)
+    deliveredInterrupt.map(_.virtualInterruptIsHvictlInject).getOrElse(false.B), if (HasFDI) false.B else observedInject)
+  val irToHS = Mux(useAcceptedInterrupt, deliveredInterrupt.map(_.irToHS).getOrElse(false.B), if (HasFDI) false.B else observedToHS)
+  val irToVS = Mux(useAcceptedInterrupt, deliveredInterrupt.map(_.irToVS).getOrElse(false.B), if (HasFDI) false.B else observedToVS)
 
   val trapHandleMod = Module(new TrapHandleModule)
 
@@ -574,7 +574,7 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   // Todo: all wen and wdata of CSRModule assigned in this for loop
   for ((id, (wBundle, _)) <- csrRwMap) {
-    if (HasUserTimerInterrupt && UserTimerCSRAddress.all.contains(id)) {
+    if (HasFDI && UserTimerCSRAddress.all.contains(id)) {
       // The wrapper captures final RMW data on fire. Keep this address selection aligned
       // with that data for the following write edge, including bubbles and output stalls.
       val acceptedWrite = RegNext(io.in.fire && wenLegal && addr === id.U && !redirectFlush, false.B)
@@ -603,7 +603,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   permitMod.io.in.privState := privState
   permitMod.io.in.debugMode := debugMode
   permitMod.io.in.userHandler := userInHandler.getOrElse(false.B)
-  permitMod.io.in.userTimerEnabled := HasUserTimerInterrupt.B
+  permitMod.io.in.userTimerEnabled := HasFDI.B
   permitMod.io.in.xRet.uret := io.in.bits.uret && valid
 
   permitMod.io.in.xRet.mnret := io.in.bits.mnret && valid
@@ -1227,7 +1227,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.out.bits.userReturnTarget := 0.U.asTypeOf(new TargetPCBundle)
   io.out.bits.userReturnRedirect := false.B
 
-  if (HasUserTimerInterrupt) {
+  if (HasFDI) {
     val port = io.huEntry.get
     val hu = trapEntryHUEvent.get
     val ret = uretEvent.get
@@ -1442,7 +1442,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   debugMod.io.in.tdata1Wdata               := wdata
   debugMod.io.in.triggerCanRaiseBpExp      := triggerCanRaiseBpExp
 
-  if (HasUserTimerInterrupt) {
+  if (HasFDI) {
     when(huBusy.get && (huFinished.get || huTrapFinished.get) &&
       criticalErrorState && dcsr.regOut.CETRIG.asBool && !debugMode) {
       deferredCriticalDebug.get := true.B

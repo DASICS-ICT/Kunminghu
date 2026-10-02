@@ -20,7 +20,7 @@ object UserTimerCycleObservations {
     val timer = bank.userTimer.get
     val filter = bank.intrMod
     val memory = core.memBlock.inner.module
-    require(core.coreParams.HasUserTimerInterrupt && csr.cfg.ckAlwaysEn)
+    require(core.coreParams.HasFDI && csr.cfg.ckAlwaysEn)
 
     // This counter has the same clock, reset and initial value as the retained raw logger
     // and reference observer. A row samples the values consumed at its numbered edge.

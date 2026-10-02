@@ -239,7 +239,7 @@ class UserTimerEntryReturnTest extends AnyFlatSpec with ChiselScalatestTester {
     assert(java.nio.file.Paths.get("").toRealPath() == runRoot)
     val base = new top.DefaultConfig
     implicit val p: Parameters = base.alterPartial {
-      case XSCoreParamsKey => base(XSTileKey).head.copy(HasUserTimerInterrupt = enabled)
+      case XSCoreParamsKey => base(XSTileKey).head.copy(HasFDI = enabled)
       case DebugOptionsKey => base(DebugOptionsKey).copy(FPGAPlatform = true,
         EnableDifftest = false, AlwaysBasicDiff = false, EnablePerfDebug = false,
         EnableChiselDB = false, AlwaysBasicDB = false)

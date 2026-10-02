@@ -12,7 +12,7 @@ import xiangshan.backend.rob.RobPtr
 class UserTimerReferenceObserverTest extends AnyFlatSpec with ChiselScalatestTester {
   private val base = new top.DefaultConfig
   private implicit val parameters: Parameters = base.alterPartial {
-    case XSCoreParamsKey => base(XSTileKey).head.copy(HasUserTimerInterrupt = true)
+    case XSCoreParamsKey => base(XSTileKey).head.copy(HasFDI = true)
   }
 
   private def clear(data: Data): Unit = data match {

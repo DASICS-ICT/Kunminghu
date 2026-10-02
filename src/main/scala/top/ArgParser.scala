@@ -37,6 +37,7 @@ object ArgParser {
       |--xs-help                  print this help message
       |--version                  print version info
       |--config <ConfigClassName>
+      |--has-fdi <true|false>      compile the DASICS feature family
       |--num-cores <Int>
       |--hartidbits <Int>
       |--with-dramsim3
@@ -63,6 +64,8 @@ object ArgParser {
     val default = new DefaultConfig(1)
     var firrtlOpts = Array[String]()
     var firtoolOpts = Array[String]()
+    // Apply the feature selection after every configuration source has been resolved.
+    var hasFDI: Option[Boolean] = None
     @tailrec
     def nextOption(config: Parameters, list: List[String]): Parameters = {
       list match {
@@ -77,6 +80,21 @@ object ArgParser {
           nextOption(config, tail)
         case "--config" :: confString :: tail =>
           nextOption(getConfigByName(confString), tail)
+        case "--has-fdi" :: value :: tail =>
+          require(hasFDI.isEmpty, "--has-fdi must be specified at most once")
+          hasFDI = Some(value match {
+            case "true" => true
+            case "false" => false
+            case _ => throw new IllegalArgumentException("--has-fdi requires true or false")
+          })
+          nextOption(config, tail)
+        case "--has-fdi" :: Nil =>
+          throw new IllegalArgumentException("--has-fdi requires true or false")
+        case option :: _ if Set("--has-fdi", "--HasFDI", "HasFDI").contains(option.takeWhile(_ != '=')) =>
+          throw new IllegalArgumentException("Use --has-fdi followed by true or false")
+        case option :: _ if Set("--has-user-timer-interrupt", "--user-timer-interrupt",
+          "--HasUserTimerInterrupt", "HasUserTimerInterrupt").contains(option.takeWhile(_ != '=')) =>
+          throw new IllegalArgumentException("Independent user timer selection is unsupported; use --has-fdi")
         case "--issue" :: issueString :: tail =>
           nextOption(config.alter((site, here, up) => {
             case coupledL2.tl2chi.CHIIssue => issueString
@@ -227,7 +245,14 @@ object ArgParser {
       }
     }
     val newArgs = DifftestModule.parseArgs(args)
-    val config = nextOption(default, newArgs.toList).alter((site, here, up) => {
+    val parsedConfig = nextOption(default, newArgs.toList)
+    val featureConfig = hasFDI match {
+      case Some(enabled) => parsedConfig.alter((site, here, up) => {
+        case XSTileKey => up(XSTileKey).map(_.copy(HasFDI = enabled))
+      })
+      case None => parsedConfig
+    }
+    val config = featureConfig.alter((site, here, up) => {
       case LogUtilsOptionsKey => LogUtilsOptions(
         here(DebugOptionsKey).EnableDebug,
         here(DebugOptionsKey).EnablePerfDebug,

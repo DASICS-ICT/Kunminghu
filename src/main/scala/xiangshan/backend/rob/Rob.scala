@@ -85,7 +85,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val lsq = new RobLsqIO
     val robDeqPtr = Output(new RobPtr)
     val csr = new RobCSRIO
-    val huCanAccept = Option.when(HasUserTimerInterrupt)(Input(Bool()))
+    val huCanAccept = Option.when(HasFDI)(Input(Bool()))
     val snpt = Input(new SnapshotPort)
     val robFull = Output(Bool())
     val headNotReady = Output(Bool())
@@ -567,8 +567,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val huAccepted = WireDefault(false.B)
   val interruptClaim = WireDefault(false.B)
   val huAcceptanceBlocked = WireDefault(false.B)
-  val interruptDescriptorReg = Option.when(HasUserTimerInterrupt)(Reg(new InterruptDescriptor))
-  val intrBitSetReg = if (HasUserTimerInterrupt) {
+  val interruptDescriptorReg = Option.when(HasFDI)(Reg(new InterruptDescriptor))
+  val intrBitSetReg = if (HasFDI) {
     val delivery = io.csr.userTimerDelivery.get
     val candidateValid = RegInit(false.B)
     val candidateBits = interruptDescriptorReg.get
@@ -631,8 +631,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   // Block any redirect or commit at the next cycle.
   val lastCycleFlush = RegNext(io.flushOut.valid)
 
-  val selectedInterruptEvent = Option.when(HasUserTimerInterrupt)(Wire(new InterruptEventIdentity))
-  if (HasUserTimerInterrupt) {
+  val selectedInterruptEvent = Option.when(HasFDI)(Wire(new InterruptEventIdentity))
+  if (HasFDI) {
     val delivery = io.csr.userTimerDelivery.get
     val event = selectedInterruptEvent.get
     event.interrupt := Mux(intrEnable, interruptDescriptorReg.get, 0.U.asTypeOf(new InterruptDescriptor))

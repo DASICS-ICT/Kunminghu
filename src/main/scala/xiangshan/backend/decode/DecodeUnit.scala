@@ -818,7 +818,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
 
   // The experimental host user return uses an exact encoding and existing return serialization.
   private val userReturnEncoding = BigInt("00200073", 16)
-  private val userReturnDecode: Array[(BitPat, List[BitPat])] = if (HasUserTimerInterrupt) {
+  private val userReturnDecode: Array[(BitPat, List[BitPat])] = if (HasFDI) {
     require(!baseDecodeTable.exists { case (pattern, _) =>
       (userReturnEncoding & pattern.mask) == pattern.value
     }, "Host user return encoding overlaps an existing instruction")

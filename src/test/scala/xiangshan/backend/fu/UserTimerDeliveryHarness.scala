@@ -21,7 +21,7 @@ import xiangshan.frontend._
 // These test configurations keep the production core shape and change only this feature.
 class UserTimerEnabledFpgaConfig(n: Int = 1) extends Config(
   (new top.FpgaDefaultConfig(n)).alter((site, here, up) => {
-    case XSTileKey => up(XSTileKey).map(_.copy(HasUserTimerInterrupt = true))
+    case XSTileKey => up(XSTileKey).map(_.copy(HasFDI = true))
   })
 )
 
@@ -32,7 +32,7 @@ object UserTimerDeliveryParameters {
       "--config", "FpgaDefaultConfig", "--num-cores", "1",
       "--l2-cache-size", "256", "--l3-cache-size", "768",
       "--fpga-platform", "--disable-always-basic-diff", "--disable-perf", "--disable-alwaysdb"))
-    val core = base(XSTileKey).head.copy(HasUserTimerInterrupt = enabled)
+    val core = base(XSTileKey).head.copy(HasFDI = enabled)
     require(core.HasVPU && core.VLEN == 128)
     require(base(DebugOptionsKey).FPGAPlatform && !base(DebugOptionsKey).EnableDifftest &&
       !base(DebugOptionsKey).AlwaysBasicDiff && !base(DebugOptionsKey).EnableChiselDB)

@@ -77,7 +77,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val uopNum = UInt(log2Up(MaxUopSize + 1).W)
     val needFlush = Bool()
     // HU may interrupt a ROB group only after its last uop has actually entered.
-    val huGroupSealed = Option.when(HasUserTimerInterrupt)(Bool())
+    val huGroupSealed = Option.when(HasFDI)(Bool())
     // status end
 
     // debug_begin
@@ -115,7 +115,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val fpWen = Bool()
     val rfWen = Bool()
     val needFlush = Bool()
-    val huGroupSealed = Option.when(HasUserTimerInterrupt)(Bool())
+    val huGroupSealed = Option.when(HasFDI)(Bool())
     // trace
     val traceBlockInPipe = new TracePipe(IretireWidthInPipe)
     // debug_begin
@@ -223,7 +223,7 @@ object RobPtr {
 }
 
 class RobCSRIO(implicit p: Parameters) extends XSBundle {
-  val userTimerDelivery = Option.when(HasUserTimerInterrupt)(Flipped(new UserTimerDeliveryIO))
+  val userTimerDelivery = Option.when(HasFDI)(Flipped(new UserTimerDeliveryIO))
   val intrBitSet = Input(Bool())
   val trapTarget = Input(new TargetPCBundle)
   val isXRet     = Input(Bool())

@@ -104,14 +104,14 @@ class CtrlBlockImp(
   private val disableFusion = decode.io.csrCtrl.singlestep || !decode.io.csrCtrl.fusion_enable
 
   // Control owns the accepted identity until its terminal target reaches the frontend.
-  private val huBusy = Option.when(HasUserTimerInterrupt)(RegInit(false.B))
-  private val huEvent = Option.when(HasUserTimerInterrupt)(Reg(new InterruptEventIdentity))
+  private val huBusy = Option.when(HasFDI)(RegInit(false.B))
+  private val huEvent = Option.when(HasFDI)(Reg(new InterruptEventIdentity))
   private val huFrontendAhead = WireDefault(false.B)
   private val huFrontendRedirect = WireDefault(0.U.asTypeOf(Valid(new Redirect)))
   private val huFrontendBlocked = WireDefault(false.B)
   private val huTraceBlocked = WireDefault(false.B)
   private val huTraceIsTimer = WireDefault(false.B)
-  private val huTraceEvent = Option.when(HasUserTimerInterrupt)(WireDefault(0.U.asTypeOf(Valid(new InterruptEventIdentity))))
+  private val huTraceEvent = Option.when(HasFDI)(WireDefault(0.U.asTypeOf(Valid(new InterruptEventIdentity))))
 
   private val s0_robFlushRedirect = rob.io.flushOut
   private val s1_robFlushRedirect = Wire(Valid(new Redirect))
@@ -122,7 +122,7 @@ class CtrlBlockImp(
   pcMem.io.raddr(pcMemRdIndexes("robFlush").head) := s0_robFlushRedirect.bits.ftqIdx.value
   private val s1_robFlushPc = pcMem.io.rdata(pcMemRdIndexes("robFlush").head).startAddr + (RegEnable(s0_robFlushRedirect.bits.ftqOffset, s0_robFlushRedirect.valid) << instOffsetBits)
   private val s3_redirectGen = WireInit(redirectGen.io.stage2Redirect)
-  if (HasUserTimerInterrupt) {
+  if (HasFDI) {
     // Younger redirects cannot displace a target already owned by the ROB head.
     s3_redirectGen.valid := redirectGen.io.stage2Redirect.valid &&
       (!huBusy.get || huEvent.get.robIdx.needFlush(redirectGen.io.stage2Redirect))
@@ -139,7 +139,7 @@ class CtrlBlockImp(
   val s2_s4_redirect = RegNextWithEnable(s1_s3_redirect)
   val s3_s5_redirect = RegNextWithEnable(s2_s4_redirect)
 
-  if (HasUserTimerInterrupt) {
+  if (HasFDI) {
     val delivery = io.robio.csr.userTimerDelivery.get
     val entry = delivery.entry
     val savedSatpMode = Reg(UInt(4.W))
@@ -412,7 +412,7 @@ class CtrlBlockImp(
   trace.io.in.fromEncoder.enable := io.traceCoreInterface.fromEncoder.enable
   trace.io.in.fromRob            := rob.io.trace.traceCommitInfo
   rob.io.trace.blockCommit       := trace.io.out.blockRobCommit
-  if (HasUserTimerInterrupt) {
+  if (HasFDI) {
     // The terminal packet must leave trace stage 1 before a later trap can replace its bits.
     huTraceBlocked := trace.io.out.blockRobCommit || trace.io.out.blockRobCommitNext.get
     when(huTraceEvent.get.valid) {
@@ -910,7 +910,7 @@ class CtrlBlockImp(
   io.robio.csr.elements.filterNot(_._1 == "userTimerDelivery").foreach { case (name, field) =>
     field <> rob.io.csr.elements(name)
   }
-  if (HasUserTimerInterrupt) {
+  if (HasFDI) {
     val delivery = io.robio.csr.userTimerDelivery.get
     val robDelivery = rob.io.csr.userTimerDelivery.get
     robDelivery.candidate := delivery.candidate

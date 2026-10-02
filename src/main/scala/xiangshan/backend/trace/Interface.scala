@@ -26,7 +26,7 @@ class TraceBlock(hasIaddr: Boolean, iretireWidth: Int)(implicit val p: Parameter
   val ftqOffset = if (!hasIaddr)  Some(UInt(log2Up(PredictWidth).W))      else None
   val tracePipe = new TracePipe(iretireWidth)
   // HU's fixed trap metadata belongs to this trace record throughout buffering.
-  val huTimer = Option.when(HasUserTimerInterrupt)(Bool())
+  val huTimer = Option.when(HasFDI)(Bool())
 }
 
 class TraceBundle(hasIaddr: Boolean, blockSize: Int, iretireWidth: Int)(implicit val p: Parameters) extends Bundle with HasXSParameter {

@@ -29,8 +29,8 @@ trait CSREvents { self: NewCSR =>
 
   val dretEvent  = Module(new DretEventModule)
 
-  val trapEntryHUEvent = if (HasUserTimerInterrupt) Some(Module(new TrapEntryHUEvent)) else None
-  val uretEvent = if (HasUserTimerInterrupt) Some(Module(new UretEvent)) else None
+  val trapEntryHUEvent = if (HasFDI) Some(Module(new TrapEntryHUEvent)) else None
+  val uretEvent = if (HasFDI) Some(Module(new UretEvent)) else None
 
   val events: Seq[Module with CSREventBase] = Seq(
     trapEntryDEvent,

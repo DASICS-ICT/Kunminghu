@@ -20,7 +20,7 @@ object UserTimerReferenceObservations {
   val csrExu = core.backend.inner.intExuBlock.get.exus.find(_.exuParams.hasCSR).get.module
   val csr = csrExu.funcUnits.collectFirst { case unit: CSR => unit }.get
   val bank = csr.csrMod
-  val enabled = core.coreParams.HasUserTimerInterrupt
+  val enabled = core.coreParams.HasFDI
   require(csr.cfg.ckAlwaysEn)
 
   // Every bore is created at module scope, outside conditionals and DUT reset control.
@@ -261,15 +261,13 @@ class UserTimerReferenceDisabledSimTop(implicit val referenceParameters: Paramet
 
 object UserTimerReferenceMain extends App {
   require(sys.env.get("UIT06_PROTOCOL_VERSION").contains("1"), "UIT06_PROTOCOL_VERSION must be 1")
+  // Preserve this legacy fixture input as an explicit mapping to the sole production feature.
   val enabled = sys.env.get("UIT06_USER_TIMER") match {
     case Some("1") => true
     case Some("0") => false
     case _ => throw new IllegalArgumentException("UIT06_USER_TIMER must be 0 or 1")
   }
-  val (base, firrtlOpts, firtoolOpts) = top.ArgParser.parse(args)
-  val config = base.alterPartial {
-    case XSTileKey => base(XSTileKey).map(_.copy(HasUserTimerInterrupt = enabled))
-  }
+  val (config, firrtlOpts, firtoolOpts) = top.ArgParser.parse(args ++ Array("--has-fdi", enabled.toString))
   require(config(XSTileKey).size == 1)
   val options = config(DebugOptionsKey)
   require(!options.FPGAPlatform && options.EnableDifftest)

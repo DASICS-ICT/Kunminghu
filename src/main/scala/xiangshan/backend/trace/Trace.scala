@@ -22,7 +22,7 @@ class TraceIO(implicit val p: Parameters) extends Bundle with HasXSParameter {
     val toPcMem        = new TraceBundle(hasIaddr = false, TraceGroupNum, IretireWidthCompressed)
     val toEncoder      = new TraceBundle(hasIaddr = false,  TraceGroupNum, IretireWidthCompressed)
     val blockRobCommit = Output(Bool())
-    val blockRobCommitNext = Option.when(HasUserTimerInterrupt)(Output(Bool()))
+    val blockRobCommitNext = Option.when(HasFDI)(Output(Bool()))
   }
 }
 

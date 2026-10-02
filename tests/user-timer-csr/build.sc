@@ -94,15 +94,24 @@ object production extends ProductionModule {
     ivy"io.circe::circe-yaml:1.15.0",
     ivy"io.circe::circe-generic-extras:0.14.4")
   override def resources = T.sources {
-    val revision = os.proc("git", "rev-parse", "HEAD").call(cwd = sourceRoot).out.text().trim
-    val changed = os.proc("git", "status", "--porcelain").call(cwd = sourceRoot).out.text().nonEmpty
+    // Frozen candidate trees have no Git metadata and must not inherit the enclosing repository identity.
+    val frozenIdentity = os.exists(sourceRoot / "candidate-revision")
+    require(frozenIdentity == os.exists(sourceRoot / "candidate-dirty"), "Incomplete frozen source identity")
+    require(frozenIdentity || os.exists(sourceRoot / ".git"), "Source root has no local Git or frozen identity")
+    val revision = if (frozenIdentity) os.read(sourceRoot / "candidate-revision").trim
+      else os.proc("git", "rev-parse", "HEAD").call(cwd = sourceRoot).out.text().trim
+    require(revision.nonEmpty, "Empty source revision")
+    val dirty = if (frozenIdentity) os.read(sourceRoot / "candidate-dirty").trim
+      else if (os.proc("git", "status", "--porcelain").call(cwd = sourceRoot).out.text().nonEmpty) "1" else "0"
+    require(Set("0", "1").contains(dirty), "Invalid source dirty state")
+    val changed = dirty == "1"
     os.write(T.dest / "gitStatus", s"SHA=$revision\ndirty=${if (changed) 1 else 0}\n")
     super.resources() ++ Seq(PathRef(T.dest))
   }
 
   object test extends ScalaTests with TestModule.ScalaTest {
     override def sources = T.sources {
-      Seq("UserTimerCSRTest.scala", "UserTimerCSRIntegrationTest.scala", "UserTimerDecodeTest.scala", "UserTimerTest.scala")
+      Seq("HasFDIConfigurationTest.scala", "UserTimerCSRTest.scala", "UserTimerCSRIntegrationTest.scala", "UserTimerDecodeTest.scala", "UserTimerTest.scala")
         .map(name => PathRef(sourceRoot / "src/test/scala/xiangshan/backend/fu" / name))
     }
     override def ivyDeps = Agg(ivy"edu.berkeley.cs::chiseltest:6.0.0")

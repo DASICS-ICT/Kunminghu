@@ -36,14 +36,14 @@ class UepcBundle extends CSRBundle {
 
 trait UserTimerCSRs { self: NewCSR =>
   // Handler ownership survives ordinary privilege/debug traps and is not software writable.
-  val userInHandler = if (HasUserTimerInterrupt) Some(RegInit(false.B)) else None
+  val userInHandler = if (HasFDI) Some(RegInit(false.B)) else None
   val userEntryEffect = WireDefault(false.B)
   val userReturnEffect = WireDefault(false.B)
   userInHandler.foreach { active =>
     when(userEntryEffect) { active := true.B }
       .elsewhen(userReturnEffect) { active := false.B }
   }
-  val userTimerCSRMods: Seq[CSRModule[_]] = if (HasUserTimerInterrupt) Seq(
+  val userTimerCSRMods: Seq[CSRModule[_]] = if (HasFDI) Seq(
     Module(new CSRModule("Ustatus", new UstatusBundle) with TrapEntryHUEventSink with UretEventSink).setAddr(UserTimerCSRAddress.ustatus),
     Module(new CSRModule("Uie", new CSRBundle {
       val UTIE = RW(4).withReset(0.U)
@@ -58,10 +58,10 @@ trait UserTimerCSRs { self: NewCSR =>
     Module(new CSRModule("Utval", new FieldInitBundle) with TrapEntryHUEventSink).setAddr(UserTimerCSRAddress.utval)
   ) else Seq.empty
 
-  val userTimer = if (HasUserTimerInterrupt) Some(Module(new UserTimer)) else None
+  val userTimer = if (HasFDI) Some(Module(new UserTimer)) else None
   // Read-through ports keep all countdown and pending state in the existing primitive.
-  val userTimerWrite = if (HasUserTimerInterrupt) Some(Wire(new CSRAddrWriteBundle(new OneFieldBundle))) else None
-  val userPendingWrite = if (HasUserTimerInterrupt) Some(Wire(new CSRAddrWriteBundle(new OneFieldBundle))) else None
+  val userTimerWrite = if (HasFDI) Some(Wire(new CSRAddrWriteBundle(new OneFieldBundle))) else None
+  val userPendingWrite = if (HasFDI) Some(Wire(new CSRAddrWriteBundle(new OneFieldBundle))) else None
 
   val userTimerCSRMap: SeqMap[Int, (CSRAddrWriteBundle[_], UInt)] = SeqMap.from(
     userTimerCSRMods.map(mod => mod.addr -> (mod.w, mod.rdata)) ++ userTimer.toSeq.flatMap { timer =>

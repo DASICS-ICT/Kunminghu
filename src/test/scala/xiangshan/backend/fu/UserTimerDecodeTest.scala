@@ -49,7 +49,7 @@ class UserTimerDecodeTest extends AnyFlatSpec with ChiselScalatestTester {
       assert(java.nio.file.Paths.get("").toRealPath() == runRoot)
       val base = new top.DefaultConfig
       implicit val p: Parameters = base.alterPartial {
-        case XSCoreParamsKey => base(XSTileKey).head.copy(HasUserTimerInterrupt = enabled)
+        case XSCoreParamsKey => base(XSTileKey).head.copy(HasFDI = enabled)
         case DebugOptionsKey => base(DebugOptionsKey).copy(FPGAPlatform = true,
           EnableDifftest = false, AlwaysBasicDiff = false, EnablePerfDebug = false,
           EnableChiselDB = false, AlwaysBasicDB = false)
@@ -83,6 +83,15 @@ class UserTimerDecodeTest extends AnyFlatSpec with ChiselScalatestTester {
         // Exact matching must leave adjacent unsupported SYSTEM encodings illegal.
         for (instruction <- Seq("00300073", "002000f3", "00208073")) {
           check(BigInt(instruction, 16), illegal = true, csr = false)
+        }
+        // The feature switch does not implement either reserved call encoding.
+        // Vary operand and immediate bits without changing the frozen opcode/funct3 mask.
+        val callMask = BigInt("0000707f", 16)
+        for (pattern <- Seq(BigInt("0000000b", 16), BigInt("0000100b", 16));
+             operands <- Seq(BigInt(0), BigInt("123a8f80", 16), BigInt("ffff8f80", 16))) {
+          val instruction = pattern | (operands & (BigInt("ffffffff", 16) ^ callMask))
+          assert((instruction & callMask) == pattern)
+          check(instruction, illegal = true, csr = false)
         }
         for (function <- Seq(1, 2, 3, 5, 6, 7)) {
           val instruction = (BigInt(0x800) << 20) | (BigInt(1) << 15) | (function << 12) | (1 << 7) | 0x73

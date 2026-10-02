@@ -17,7 +17,7 @@ class TraceBuffer(implicit val p: Parameters) extends Module
     }
     val out = new Bundle { // output groups to pcMem
       val blockCommit = Output(Bool())
-      val blockCommitNext = Option.when(HasUserTimerInterrupt)(Output(Bool()))
+      val blockCommitNext = Option.when(HasFDI)(Output(Bool()))
       val groups = new TraceBundle(hasIaddr = false, TraceGroupNum, IretireWidthCompressed)
     }
   })

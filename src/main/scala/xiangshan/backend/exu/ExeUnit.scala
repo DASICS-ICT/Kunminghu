@@ -391,7 +391,7 @@ class ExeUnitImp(
       exuio <> fuio
       fuio.exception := DelayN(exuio.exception, 2)
       fuio.robDeqPtr := DelayN(exuio.robDeqPtr, 2)
-      if (HasUserTimerInterrupt) {
+      if (HasFDI) {
         // The PC retains the existing two-stage transport latency. Reservation and
         // cancellation bypass it; a canceled transaction still needs its PC to replay.
         val source = exuio.userTimerDelivery.get.entry.request

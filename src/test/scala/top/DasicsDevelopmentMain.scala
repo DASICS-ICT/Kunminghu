@@ -9,17 +9,19 @@ import system.SoCParamsKey
 import utility.{ChiselDB, Constantin, FileRegisters}
 import xiangshan.{DebugOptionsKey, XSTileKey}
 
-/** Records the legacy off mapping without adding production parameters or observations. */
+/** Records final production parameters; ordinary SimTop provides no dedicated feature observations. */
 object DasicsDevelopmentMain extends App {
+  val retiredSelections = Seq("HasUserTimerInterrupt", "CONFIG_RV_USER_TIMER", "CONFIG_DIFFTEST_UIT",
+    "UIT05_USER_TIMER", "UIT06_USER_TIMER", "UIT07_USER_TIMER")
+  require(!retiredSelections.exists(sys.env.contains), "Independent UIT environment selection is retired")
   val (config, firrtlOpts, firtoolOpts) = ArgParser.parse(args)
   val cores = config(XSTileKey)
   val options = config(DebugOptionsKey)
   val soc = config(SoCParamsKey)
   require(cores.size == 1, "The development mapping requires one hart")
   val core = cores.head
-  val hasProductionSwitch = core.productElementNames.contains("HasFDI")
-  require(!hasProductionSwitch, "A production HasFDI parameter requires a reviewed mapping")
-  require(!core.HasUserTimerInterrupt, "The legacy off mapping requires UIT to be absent")
+  require(!core.productElementNames.contains("HasUserTimerInterrupt"),
+    "The production core must have only one feature parameter")
   require(core.XLEN == 64 && core.VLEN == 128 && core.HasVPU,
     "The development mapping requires RV64 and RVV with VLEN=128")
   require(core.HartId == 0 && core.RobSize > 0 && core.RenameWidth > 0)
@@ -43,8 +45,10 @@ object DasicsDevelopmentMain extends App {
 
   val actual = Json.obj(
     "schema_version" -> Json.fromInt(1),
-    "compile_origin" -> Json.fromString("legacy-off-mapping"),
-    "production_has_fdi_parameter" -> Json.fromBoolean(hasProductionSwitch),
+    "compile_origin" -> Json.fromString("generated"),
+    "production_has_fdi_parameter" -> Json.fromBoolean(core.productElementNames.contains("HasFDI")),
+    "has_fdi" -> Json.fromBoolean(core.HasFDI),
+    "dedicated_observation_hook" -> Json.fromBoolean(false),
     "emitter" -> Json.fromString("top.DasicsDevelopmentMain"),
     "top" -> Json.fromString("top.SimTop"),
     "cores" -> Json.fromInt(cores.size),
@@ -52,7 +56,6 @@ object DasicsDevelopmentMain extends App {
     "xlen" -> Json.fromInt(core.XLEN),
     "vlen" -> Json.fromInt(core.VLEN),
     "has_vpu" -> Json.fromBoolean(core.HasVPU),
-    "has_user_timer_interrupt" -> Json.fromBoolean(core.HasUserTimerInterrupt),
     "fpga_platform" -> Json.fromBoolean(options.FPGAPlatform),
     "enable_difftest" -> Json.fromBoolean(options.EnableDifftest),
     "rob_entries" -> Json.fromInt(core.RobSize),

@@ -70,7 +70,7 @@ class UserTimerCSRTest extends AnyFlatSpec with ChiselScalatestTester {
   private def parameters(enabled: Boolean): Parameters = {
     val base = new top.DefaultConfig
     base.alterPartial {
-      case XSCoreParamsKey => base(XSTileKey).head.copy(HasUserTimerInterrupt = enabled)
+      case XSCoreParamsKey => base(XSTileKey).head.copy(HasFDI = enabled)
       case DebugOptionsKey => base(DebugOptionsKey).copy(FPGAPlatform = true,
         EnableDifftest = false, AlwaysBasicDiff = false, EnablePerfDebug = false,
         EnableChiselDB = false, AlwaysBasicDB = false)
@@ -81,7 +81,7 @@ class UserTimerCSRTest extends AnyFlatSpec with ChiselScalatestTester {
     it should s"advertise only the selected experimental capability with enabled=$enabled" in {
       val runRoot = java.nio.file.Paths.get(sys.props("uit02.runRoot")).toRealPath()
       assert(java.nio.file.Paths.get("").toRealPath() == runRoot)
-      assert(!XSCoreParameters().HasUserTimerInterrupt)
+      assert(!XSCoreParameters().HasFDI)
       implicit val p: Parameters = parameters(enabled)
       test(new UserTimerCSRHarness).withAnnotations(Seq(
         VerilatorBackendAnnotation,

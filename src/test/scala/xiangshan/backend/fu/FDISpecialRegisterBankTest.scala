@@ -7,28 +7,20 @@ import chiseltest._
 import firrtl2.options.TargetDirAnnotation
 import org.chipsalliance.cde.config.Parameters
 import org.scalatest.flatspec.AnyFlatSpec
-import xiangshan.backend.fu.NewCSR.{FDIBoundRegisterBank, FDIMainCfgBank, FDISpecialRegisterBank}
+import xiangshan.backend.fu.NewCSR.FDISpecialRegisterBank
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 import scala.collection.mutable
 import scala.util.Random
 
-// Test-only dispatch over the actual native CSR instance groups. No CSR state
-// is reimplemented here. C05 will own production dispatch and authorization.
-class FDIBoundMapTestHarness(includeMainCfg: Boolean, includeSpecial: Boolean = false)(implicit p: Parameters)
-  extends Module with RequireSyncReset {
-  private val bounds = new FDIBoundRegisterBank
-  private val main = if (includeMainCfg) Some(new FDIMainCfgBank) else None
-  private val special = if (includeSpecial) Some(new FDISpecialRegisterBank) else None
-  private val mainRw = main.toSeq.flatMap(_.csrRwMap.toSeq)
-  private val mainOut = main.toSeq.flatMap(_.csrOutMap.toSeq)
-  private val rw = bounds.csrRwMap.toSeq ++ mainRw ++ special.toSeq.flatMap(_.csrRwMap.toSeq)
-  private val out = bounds.csrOutMap.toSeq ++ mainOut ++ special.toSeq.flatMap(_.csrOutMap.toSeq)
-  require(rw.size == 46 + (if (includeMainCfg) 2 else 0) + (if (includeSpecial) 4 else 0))
-  require(rw.map(_._1).distinct.size == rw.size)
-  require(out.map(_._1) == rw.map(_._1))
-  require(bounds.csrMods.size + main.toSeq.flatMap(_.csrMods).size + special.toSeq.flatMap(_.csrMods).size ==
-    46 + (if (includeMainCfg) 1 else 0) + (if (includeSpecial) 4 else 0))
+// Only the test shell decodes addresses. Every architectural state bit remains
+// owned by the actual production CSRModule instance in this group.
+class FDISpecialMapTestHarness(implicit p: Parameters) extends Module with RequireSyncReset {
+  private val registers = new FDISpecialRegisterBank
+  private val rw = registers.csrRwMap.toSeq
+  private val out = registers.csrOutMap.toSeq
+  require(registers.csrMods.size == 4 && rw.size == 4)
+  require(rw.map(_._1).distinct.size == 4 && out.map(_._1) == rw.map(_._1))
   val io = IO(new Bundle {
     val readAddress = Input(UInt(12.W))
     val readEnable = Input(Bool())
@@ -38,9 +30,9 @@ class FDIBoundMapTestHarness(includeMainCfg: Boolean, includeSpecial: Boolean = 
     val write = Flipped(Valid(new FDIMainCfgTestWrite))
     val writeCancel = Input(Bool())
     val writeApplied = Output(Bool())
-    val addresses = Output(Vec(rw.size, UInt(12.W)))
-    val views = Output(Vec(rw.size, UInt(64.W)))
-    val rmwViews = Output(Vec(out.size, UInt(64.W)))
+    val addresses = Output(Vec(4, UInt(12.W)))
+    val views = Output(Vec(4, UInt(64.W)))
+    val rmwViews = Output(Vec(4, UInt(64.W)))
   })
   private val rsel = rw.map { case (address, _) => io.readAddress === address.U }
   private val wsel = rw.map { case (address, _) => io.write.bits.address === address.U }
@@ -58,113 +50,40 @@ class FDIBoundMapTestHarness(includeMainCfg: Boolean, includeSpecial: Boolean = 
   io.rmwViews := VecInit(out.map(_._2))
 }
 
-// The single-slot adapter consumes a saved final-write transaction exactly
-// once. Its policy inputs are local test controls, not production permissions.
-class FDIBoundCSRTestAdapter(includeSpecial: Boolean = false)(implicit p: Parameters)
-  extends Module with RequireSyncReset {
-  private val addressCount = if (includeSpecial) 52 else 48
-  val io = IO(new Bundle {
-    val request = Flipped(Decoupled(new FDIMainCfgTestRequest))
-    val response = Decoupled(new FDIMainCfgTestResponse)
-    val cancel = Input(Bool())
-    val addresses = Output(Vec(addressCount, UInt(12.W)))
-    val views = Output(Vec(addressCount, UInt(64.W)))
-    val rmwViews = Output(Vec(addressCount, UInt(64.W)))
-    val writeApplied = Output(Bool())
-    val savedAddress = Output(UInt(12.W))
-    val savedData = Output(UInt(64.W))
-    val savedPermit = Output(Bool())
-    val acceptedOld = Output(UInt(64.W))
-    val acceptedFinal = Output(UInt(64.W))
-    val acceptedPermit = Output(Bool())
-  })
-  private val bank = Module(new FDIBoundMapTestHarness(true, includeSpecial))
-  private val idle :: commit :: respond :: Nil = Enum(3)
-  private val state = RegInit(idle)
-  private val savedAddress = Reg(UInt(12.W))
-  private val savedData = Reg(UInt(64.W))
-  private val savedWrite = Reg(Bool())
-  private val savedPermit = Reg(Bool())
-  private val savedResponse = Reg(new FDIMainCfgTestResponse)
-  private val request = io.request.bits
-  private val known = VecInit(Seq(1, 2, 3, 5, 6, 7).map(request.operation === _.U)).asUInt.orR
-  private val replace = request.operation === 1.U || request.operation === 5.U
-  private val wantsRead = !replace || request.destination =/= 0.U
-  private val wantsWrite = replace || request.sourceEncoding =/= 0.U
-  private val stopped = reset.asBool || io.cancel
-  private val permitted = known && bank.io.readHit &&
-    (!wantsRead || request.readAllowed) && (!wantsWrite || request.writeAllowed)
-  private val source = Mux(request.operation(2), Cat(0.U(59.W), request.sourceEncoding),
-    Mux(request.sourceEncoding === 0.U, 0.U(64.W), request.operand))
-  io.request.ready := state === idle && !stopped
-  bank.io.readAddress := request.address
-  bank.io.readEnable := io.request.fire && permitted && wantsRead
-  private val finalData = Mux(replace, source,
-    Mux(request.operation(1, 0) === 2.U, bank.io.rmwData | source, bank.io.rmwData & ~source))
-  bank.io.write.valid := state === commit && savedWrite && !stopped
-  bank.io.write.bits.address := savedAddress
-  bank.io.write.bits.data := savedData
-  bank.io.writeCancel := io.cancel
-  io.addresses := bank.io.addresses
-  io.views := bank.io.views
-  io.rmwViews := bank.io.rmwViews
-  io.writeApplied := bank.io.writeApplied
-  io.savedAddress := savedAddress
-  io.savedData := savedData
-  io.savedPermit := savedPermit
-  io.acceptedOld := bank.io.readData
-  io.acceptedFinal := finalData
-  io.acceptedPermit := permitted
-  io.response.valid := state =/= idle && !stopped
-  io.response.bits := savedResponse
-  when(io.cancel) { state := idle }.otherwise {
-    when(io.request.fire) {
-      savedAddress := request.address
-      savedData := finalData
-      savedWrite := permitted && wantsWrite
-      savedPermit := permitted
-      savedResponse.tag := request.tag
-      savedResponse.address := request.address
-      savedResponse.oldData := bank.io.readData
-      savedResponse.readPerformed := permitted && wantsRead
-      savedResponse.writeRequested := permitted && wantsWrite
-      savedResponse.rejected := !permitted
-      state := commit
-    }.elsewhen(state === commit) {
-      state := Mux(io.response.ready, idle, respond)
-    }.elsewhen(io.response.fire) { state := idle }
-  }
-}
-
-class FDIBoundRegisterBankTest extends AnyFlatSpec with ChiselScalatestTester {
-  behavior of "Native DASICS CSR maps"
-  it should "preserve all C03 state and consume C02/C03 final writes without cross-address effects" in {
-    val root = Paths.get(sys.props.getOrElse("c03.runRoot", throw new IllegalArgumentException("Set c03.runRoot")))
+class FDISpecialRegisterBankTest extends AnyFlatSpec with ChiselScalatestTester {
+  behavior of "Native DASICS special CSR maps"
+  it should "preserve four independent special CSRs and consume saved software writes once" in {
+    val root = Paths.get(sys.props.getOrElse("c04.runRoot", throw new IllegalArgumentException("Set c04.runRoot")))
     require(root.isAbsolute && Paths.get("").toRealPath() == root.toRealPath())
     implicit val p: Parameters = Parameters.empty
-    // Independent literal inventory. Never import the implementation's address
-    // object, bundles, masks, or functions into the oracle.
-    val addresses = Vector(
+    // Literal architectural inventory and bit sets form an independent oracle.
+    // No implementation address, field, or mask helper is used to predict data.
+    val addresses = Vector(0x8b0, 0x8b1, 0x8b2, 0x8b3)
+    val bounds = Vector(
       0xbc5, 0xbc6, 0x9e2, 0x9e3, 0x880,
       0x890, 0x891, 0x892, 0x893, 0x894, 0x895, 0x896, 0x897,
       0x898, 0x899, 0x89a, 0x89b, 0x89c, 0x89d, 0x89e, 0x89f,
       0x8a0, 0x8a1, 0x8a2, 0x8a3, 0x8a4, 0x8a5, 0x8a6, 0x8a7,
       0x8a8, 0x8a9, 0x8aa, 0x8ab, 0x8ac, 0x8ad, 0x8ae, 0x8af,
       0x8c0, 0x8c1, 0x8c2, 0x8c3, 0x8c4, 0x8c5, 0x8c6, 0x8c7, 0x8c8)
-    val combined = addresses ++ Vector(0xbc4, 0x9e1)
+    val existing = bounds ++ Vector(0xbc4, 0x9e1)
+    val combined = existing ++ addresses
+    require(combined.distinct.size == 52)
     val u64 = (BigInt(1) << 64) - 1
-    val seed = 0xC030026L
-    val randomCases = 4096
+    val seed = 0xC040026L
+    val randomCases = 256
     val categories = mutable.Map.empty[String, Int]
     val events = mutable.Map.empty[String, Int]
     def count(m: mutable.Map[String, Int], k: String): Unit = m(k) = m.getOrElse(k, 0) + 1
     def hex(v: BigInt): String = v.toString(16)
     def bits(a: Int): Set[Int] = a match {
+      case 0x8b0 | 0x8b1 | 0x8b2 => (0 to 63).toSet
+      case 0x8b3 => Set(0, 1, 2)
       case 0x880 => (0 until 16).flatMap(i => Seq(4*i, 4*i+1, 4*i+3)).toSet
       case 0x8c8 => Set(0, 16, 32, 48)
       case 0xbc4 => (0 to 10).toSet
       case 0x9e1 => Set(1, 6, 7, 8, 9, 10)
-      case x if addresses.contains(x) => (3 to 63).toSet
+      case x if bounds.contains(x) => (3 to 63).toSet
       case _ => Set.empty
     }
     class Model(val order: Vector[Int]) {
@@ -193,16 +112,16 @@ class FDIBoundRegisterBankTest extends AnyFlatSpec with ChiselScalatestTester {
     }
     var directCycles = 0
     var directWrites = 0
-    val directTrace = Files.newBufferedWriter(root.resolve("bound-trace.csv"), StandardCharsets.UTF_8)
+    val directTrace = Files.newBufferedWriter(root.resolve("special-trace.csv"), StandardCharsets.UTF_8)
     directTrace.write("cycle,category,address,data,valid,cancel,reset,readAddress,readEnable,readHit,writeApplied,readData,rmwData,before,after\n")
     try {
-      test(new FDIBoundMapTestHarness(false)).withAnnotations(Seq(VerilatorBackendAnnotation,
-        TargetDirAnnotation("rtl-bound-registers"))) { dut =>
+      test(new FDISpecialMapTestHarness).withAnnotations(Seq(VerilatorBackendAnnotation,
+        TargetDirAnnotation("rtl-special-registers"))) { dut =>
         dut.clock.setTimeout(0)
         val model = new Model(addresses)
         addresses.indices.foreach(i => dut.io.addresses(i).expect(addresses(i).U))
-        def tick(name: String, address: Int = 0xbc5, data: BigInt = 0, valid: Boolean = false,
-          cancel: Boolean = false, reset: Boolean = false, readAddress: Int = 0xbc5,
+        def tick(name: String, address: Int = 0x8b0, data: BigInt = 0, valid: Boolean = false,
+          cancel: Boolean = false, reset: Boolean = false, readAddress: Int = 0x8b0,
           readEnable: Boolean = true): Unit = {
           dut.reset.poke(reset.B)
           dut.io.readAddress.poke(readAddress.U)
@@ -239,56 +158,43 @@ class FDIBoundRegisterBankTest extends AnyFlatSpec with ChiselScalatestTester {
         }
         tick("initial_reset", reset = true)
         for (a <- addresses) tick("reset_read", readAddress = a)
-        for (a <- addresses) {
-          tick("all_zero", a, 0, valid = true, readAddress = a)
-          tick("all_one", a, u64, valid = true, readAddress = a)
-          tick("same_value", a, u64, valid = true, readAddress = a)
+        for (a <- addresses.take(3)) {
+          for (value <- Seq(BigInt(0), BigInt(1), BigInt(7), BigInt("8000000000000001", 16),
+            BigInt("fffffffffffffff9", 16), u64))
+            tick("pc_full_width", a, value, valid = true, readAddress = a)
           for (b <- 0 until 64) {
-            tick("walk_one", a, BigInt(1) << b, valid = true, readAddress = a)
-            tick("walk_zero", a, u64 ^ (BigInt(1) << b), valid = true, readAddress = a)
+            tick("pc_walk_one", a, BigInt(1) << b, valid = true, readAddress = a)
+            tick("pc_walk_zero", a, u64 ^ (BigInt(1) << b), valid = true, readAddress = a)
           }
         }
-        for (slot <- 0 until 16) {
-          tick("lib_slot_f", 0x880, BigInt(15) << (4*slot), valid = true, readAddress = 0x880)
-          assert(model.read(0x880) == (BigInt(11) << (4*slot)))
-          tick("lib_slot_4", 0x880, BigInt(4) << (4*slot), valid = true, readAddress = 0x880)
-          assert(model.read(0x880) == 0)
-          tick("lib_slot_seed", 0x880, u64, valid = true)
-          tick("lib_slot_preserve", 0x880, u64 ^ (BigInt(15) << (4*slot)), valid = true)
+        for (value <- 0 to 7; pollution <- Seq(BigInt(0), BigInt(8), BigInt(1) << 31,
+          BigInt(1) << 63, u64 ^ BigInt(7))) {
+          tick("reason_software_values", 0x8b3, pollution | BigInt(value), valid = true, readAddress = 0x8b3)
+          assert(model.read(0x8b3) == value)
         }
-        val boundAddresses = addresses.filter(a => a != 0x880 && a != 0x8c8)
-        for (pair <- boundAddresses.grouped(2)) {
-          tick("range_cfg_seed_lib", 0x880, u64, valid = true)
-          tick("range_cfg_seed_jump", 0x8c8, u64, valid = true)
-          for ((lo, hi) <- Seq((BigInt(0), BigInt(0)),
-            (BigInt("8000000000000040", 16), BigInt("8000000000000040", 16)),
-            (BigInt("fffffffffffffff8", 16), BigInt(8)), (BigInt(8), BigInt(0)))) {
-            tick("range_lo", pair(0), lo, valid = true, readAddress = pair(1))
-            tick("range_hi", pair(1), hi, valid = true, readAddress = pair(0))
-            assert(model.read(0x880) == BigInt("bbbbbbbbbbbbbbbb", 16))
-            assert(model.read(0x8c8) == BigInt("0001000100010001", 16))
-          }
+        for (b <- 3 until 64)
+          tick("reason_high_bit", 0x8b3, (BigInt(1) << b) | BigInt(5), valid = true, readAddress = 0x8b3)
+        for (a <- addresses) {
+          tick("independent_seed", a, (BigInt(1) << 63) | BigInt(a*19+7), valid = true, readAddress = a)
+          tick("same_value", a, model.read(a), valid = true, readAddress = a)
+          tick("read_disabled", readAddress = a, readEnable = false)
         }
-        // Exhaust the 12-bit address space. Every non-member is also attempted
-        // as a write, including C02, C04, legacy aliases and address holes.
-        for (a <- 0 until 4096) {
+        // Every unknown address is tested as a write with all state views checked.
+        // Existing DASICS groups are intentionally absent from this four-CSR shell.
+        for (a <- 0 until 4096)
           tick("address_space", a, u64, valid = !addresses.contains(a), readAddress = a)
-          tick("read_disabled", a, 0, valid = false, readAddress = a, readEnable = false)
-        }
-        for ((w, wi) <- addresses.zipWithIndex; (r, ri) <- addresses.zipWithIndex) {
-          tick("cross_address", w, (BigInt(1) << 63) | BigInt(wi*65537+ri*31+7), valid = true, readAddress = r)
-        }
         for (a <- addresses; rst <- Seq(false, true); cancel <- Seq(false, true); valid <- Seq(false, true)) {
           tick("control_seed", a, u64, valid = true)
           tick("control_matrix", a, 0, valid, cancel, rst, readAddress = a)
-          tick("control_recovery", a, u64, valid = true, readAddress = a)
         }
+        tick("reason_hold_seed", 0x8b3, 7, valid = true)
+        for (_ <- 0 until 8) tick("reason_idle_hold", readAddress = 0x8b3)
         val random = new Random(seed)
         for (_ <- 0 until randomCases) {
-          val a = if (random.nextInt(10) == 0) random.nextInt(4096) else addresses(random.nextInt(46))
-          tick("direct_random", a, BigInt(64, random), random.nextInt(9) != 0,
-            random.nextInt(19) == 0, random.nextInt(257) == 0,
-            addresses(random.nextInt(46)), random.nextBoolean())
+          val a = if (random.nextInt(8) == 0) random.nextInt(4096) else addresses(random.nextInt(4))
+          tick("direct_random", a, BigInt(64, random), random.nextInt(7) != 0,
+            random.nextInt(13) == 0, random.nextInt(127) == 0,
+            addresses(random.nextInt(4)), random.nextBoolean())
         }
         tick("final_reset", data = u64, valid = true, reset = true)
       }
@@ -329,15 +235,16 @@ class FDIBoundRegisterBankTest extends AnyFlatSpec with ChiselScalatestTester {
     val csrTrace = Files.newBufferedWriter(root.resolve("csr-trace.csv"), StandardCharsets.UTF_8)
     csrTrace.write("cycle,category,phase,reqValid,reqReady,reqTag,reqAddress,reqOperation,reqEncoding,reqOperand,reqRd,readAllowed,writeAllowed,respValid,respReady,pendingTag,pendingAddress,pendingOld,pendingRead,pendingWrite,pendingRejected,savedAddress,savedData,savedPermit,writeApplied,cancel,reset,before,after\n")
     try {
-      test(new FDIBoundCSRTestAdapter()).withAnnotations(Seq(VerilatorBackendAnnotation,
-        TargetDirAnnotation("rtl-combined-csr-adapter"))) { dut =>
+      test(new FDIBoundCSRTestAdapter(includeSpecial = true)).withAnnotations(Seq(VerilatorBackendAnnotation,
+        TargetDirAnnotation("rtl-special-combined-csr-adapter"))) { dut =>
         dut.clock.setTimeout(0)
         val model = new Model(combined)
+        combined.indices.foreach(i => dut.io.addresses(i).expect(combined(i).U))
         var phase = 0
         var pending = Option.empty[Accepted]
         def tick(name: String, offer: Option[Request] = None, ready: Boolean = true,
           cancel: Boolean = false, reset: Boolean = false): Boolean = {
-          val bus = offer.getOrElse(Request(0x70000000+csrCycles, 0x8b3, 7, 31, u64, 0, false, false))
+          val bus = offer.getOrElse(Request(0x70000000+csrCycles, 0xbc4, 7, 31, u64, 0, false, false))
           dut.reset.poke(reset.B)
           dut.io.cancel.poke(cancel.B)
           dut.io.request.valid.poke(offer.nonEmpty.B)
@@ -428,42 +335,67 @@ class FDIBoundRegisterBankTest extends AnyFlatSpec with ChiselScalatestTester {
           tick(name+"_response")
         }
         tick("csr_initial_reset", reset = true)
-        access("main_seed_7ff", request(0xbc4, data = 0x7ff))
-        access("main_u_zero", request(0x9e1))
+        // Seed every existing owner once, then compare all 52 views after each
+        // special write. This checks cross-group isolation without a second
+        // exhaustive boundary-register operation matrix.
+        for (a <- existing) access("existing_seed", request(a, data = u64 ^ BigInt(a*17)))
+        access("main_alias_seed", request(0xbc4, data = 0x7ff))
+        access("main_alias_u_clear", request(0x9e1))
         assert(model.read(0xbc4) == 0x3d && model.read(0x9e1) == 0)
-        for (a <- addresses; op <- Seq(1,2,3); enc <- Seq(0,1,31); value <- Seq(BigInt(0), u64); rd <- Seq(0,1))
-          access("register_matrix", request(a, op, enc, value, rd))
-        for (a <- addresses; op <- Seq(5,6,7); zimm <- 0 until 32)
-          access("immediate_matrix", request(a, op, zimm, u64, zimm % 2))
-        for (a <- combined; op <- Seq(1,2,3,5,6,7); ra <- Seq(false,true); wa <- Seq(false,true))
-          access("permission_matrix", request(a, op, 1, u64, 1, ra, wa))
-        for (slot <- 0 until 16) {
-          access("slot_rw_f", request(0x880, data = BigInt(15) << (4*slot)))
-          assert(model.read(0x880) == (BigInt(11) << (4*slot)))
-          access("slot_rw_4", request(0x880, data = BigInt(4) << (4*slot)))
-          assert(model.read(0x880) == 0)
-          access("slot_seed", request(0x880, data = u64))
-          access("slot_clear", request(0x880, 3, 1, BigInt(15) << (4*slot)))
-          access("slot_set", request(0x880, 2, 1, BigInt(15) << (4*slot)))
+        val existingState = existing.map(model.read)
+        for (a <- addresses) {
+          access("cross_group_special", request(a, data = u64 ^ BigInt(a)))
+          assert(existing.map(model.read) == existingState)
         }
-        for (a <- combined) {
+        val specialState = addresses.map(model.read)
+        for (a <- existing) {
+          access("cross_group_existing", request(a, data = BigInt(a*31)))
+          assert(addresses.map(model.read) == specialState)
+        }
+        for (a <- addresses; op <- Seq(1,2,3); enc <- Seq(0,1); value <- Seq(BigInt(0), u64); rd <- Seq(0,1))
+          access("register_matrix", request(a, op, enc, value, rd))
+        for (a <- addresses; op <- Seq(5,6,7); zimm <- Seq(0,1,7,8,31))
+          access("immediate_matrix", request(a, op, zimm, u64, zimm % 2))
+        for (a <- addresses; op <- Seq(1,2,3,5,6,7); ra <- Seq(false,true); wa <- Seq(false,true))
+          access("permission_matrix", request(a, op, 1, u64, 1, ra, wa))
+        for (value <- 0 to 7) {
+          access("reason_csr_value", request(0x8b3, data = (u64 ^ BigInt(7)) | BigInt(value)))
+          assert(model.read(0x8b3) == value)
+          access("reason_pure_read", request(0x8b3, 2, 0, u64, wa = false))
+          assert(model.read(0x8b3) == value)
+        }
+        for (a <- addresses) {
           access("rw_rd_zero", request(a, data = u64, rd = 0, ra = false), hold = 8)
           access("rw_rd_zero_denied", request(a, rd = 0, ra = false, wa = false))
           access("nonzero_encoding_zero_source", request(a, 2, 1, 0))
           access("zero_encoding_poison_source", request(a, 3, 0, u64))
-          access("same_value", request(a, data = model.read(a)))
+          access("same_value", request(a, data = model.read(a)), hold = 3)
+          access("zero_software_write", request(a, data = 0))
+          assert(model.read(a) == 0)
         }
-        for (a <- Seq(0xbc3,0xbc7,0x9e0,0x9e4,0x881,0x88f,0x8b0,0x8b1,0x8b2,0x8b3,0x8bf,0x8c9,0,0xfff);
+        for (a <- Seq(0x8b4,0x8bf,0x88f,0x8c9,0xbc3,0xbc7,0x9e0,0x9e4,0,0xfff);
           op <- Seq(1,2,3,5,6,7)) access("unknown", request(a, op, 1, u64))
-        for (op <- Seq(0,4)) access("unknown_operation", request(0x880, op, 1, u64))
-        for (a <- combined; rst <- Seq(false,true); cancelPhase <- 0 to 2) {
+        for (op <- Seq(0,4)) access("unknown_operation", request(0x8b3, op, 1, u64))
+        for (a <- addresses; rst <- Seq(false,true); cancelPhase <- 0 to 2) {
           access("cancel_seed", request(a, data = u64))
-          if (cancelPhase > 0) tick("cancel_accept", Some(request(a)))
+          val committed = if (a == 0x8b3) BigInt(5) else (BigInt(1) << 63) | BigInt(1)
+          if (cancelPhase > 0) tick("cancel_accept", Some(request(a, data = committed)))
           if (cancelPhase > 1) tick("cancel_commit", ready = false)
           tick("cancel_matrix", Some(request(0xbc4, data = 0x7ff)), ready = false, cancel = !rst, reset = rst)
           tick("cancel_recovery")
+          if (rst) assert(combined.forall(x => model.read(x) == 0))
+          else assert(model.read(a) == (if (cancelPhase == 2) committed else if (a == 0x8b3) BigInt(7) else u64))
         }
-        val stream = (0 until 256).map { i => request(combined(i % 48), Seq(1,2,3,5,6,7)(i % 6),
+        // Poisoned live inputs in C1 must neither grant a saved denied write nor
+        // revoke an accepted one. The following response stalls cannot reissue it.
+        for (a <- addresses) {
+          access("saved_denied_seed", request(a, data = u64))
+          assert(tick("saved_denied_accept", Some(request(a, data = 0, wa = false)), ready = false))
+          tick("saved_denied_live_permit", Some(request(0x8b0, data = 1)), ready = false)
+          tick("saved_denied_response")
+          assert(model.read(a) == (if (a == 0x8b3) BigInt(7) else u64))
+        }
+        val stream = (0 until 64).map { i => request(addresses(i % 4), Seq(1,2,3,5,6,7)(i % 6),
           i % 32, (u64-i*73) & u64, i % 32, i % 7 != 0, i % 11 != 0) }
         var index = 0
         while (index < stream.size || phase != 0) {
@@ -472,14 +404,14 @@ class FDIBoundRegisterBankTest extends AnyFlatSpec with ChiselScalatestTester {
         }
         val random = new Random(seed ^ 0xA55AL)
         for (_ <- 0 until randomCases) {
-          val q = request(combined(random.nextInt(48)), Seq(1,2,3,5,6,7)(random.nextInt(6)),
-            random.nextInt(32), BigInt(64,random), random.nextInt(32), random.nextInt(17) != 0, random.nextInt(17) != 0)
+          val q = request(addresses(random.nextInt(4)), Seq(1,2,3,5,6,7)(random.nextInt(6)),
+            random.nextInt(32), BigInt(64,random), random.nextInt(32), random.nextInt(11) != 0, random.nextInt(11) != 0)
           assert(tick("random_accept", Some(q), ready = false))
-          val cancelBefore = random.nextInt(29) == 0
+          val cancelBefore = random.nextInt(17) == 0
           tick("random_commit", ready = false, cancel = cancelBefore)
           if (!cancelBefore) {
             for (_ <- 0 until random.nextInt(3)) tick("random_hold", ready = false)
-            tick("random_response", cancel = random.nextInt(31) == 0)
+            tick("random_response", cancel = random.nextInt(19) == 0)
           }
           if (random.nextInt(127) == 0) tick("random_reset", reset = true)
         }
@@ -487,15 +419,19 @@ class FDIBoundRegisterBankTest extends AnyFlatSpec with ChiselScalatestTester {
         tick("csr_final_reset", reset = true)
       }
     } finally { csrTrace.close() }
-    assert(immediateCases.count(x => addresses.contains(x._1)) == 46*3*32)
+    val requiredImmediates = (for (a <- addresses; op <- Seq(5,6,7); zimm <- Seq(0,1,7,8,31)) yield (a,op,zimm)).toSet
+    assert(requiredImmediates.subsetOf(immediateCases.toSet))
+    for (event <- Seq("direct_same_value_write", "csr_same_value_write", "request_stall", "response_hold",
+      "cancel_phase_0", "cancel_phase_1", "cancel_phase_2", "reset_phase_0", "reset_phase_1", "reset_phase_2"))
+      assert(events.getOrElse(event, 0) > 0, s"Missing coverage: $event")
     def obj(m: mutable.Map[String,Int]): String = m.toSeq.sortBy(_._1).map { case (k,v) => s"\"$k\":$v" }.mkString("{",",","}")
     val result = s"""{"status":"PASS","seed":$seed,"randomCasesPerPath":$randomCases,
-      "c03Addresses":46,"c03Backings":46,"combinedAddresses":48,"combinedBackings":47,
+      "c04Addresses":4,"c04Backings":4,"combinedAddresses":52,"combinedBackings":51,
       "directCycles":$directCycles,"directWrites":$directWrites,"csrCycles":$csrCycles,"csrWrites":$csrWrites,
       "accepted":$accepts,"responses":$responses,"cancelled":$cancelled,"remainingInflight":0,
-      "c03ImmediateMatrixCases":${46*3*32},"categories":${obj(categories)},"events":${obj(events)},
+      "c04DirectedImmediateCases":${requiredImmediates.size},"categories":${obj(categories)},"events":${obj(events)},
       "traceValues":"observed DUT reads, effects and pre/post state; independently checked before recording",
-      "scope":"Local native CSR groups and test adapters; no production NewCSR, permissions, retirement or physical timing"}
+      "scope":"Local native CSR groups and test adapters; no production NewCSR, permissions, hardware writers, retirement or physical timing"}
       """
     Files.write(root.resolve("result.json"), result.getBytes(StandardCharsets.UTF_8))
   }

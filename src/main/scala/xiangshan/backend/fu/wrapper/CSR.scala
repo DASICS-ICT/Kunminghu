@@ -118,10 +118,10 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
 
   private val robIdxReg = RegEnable(io.in.bits.ctrl.robIdx, io.in.fire)
   private val thisRobIdx = Wire(new RobPtr)
-  // A stalled return owns its saved ROB identity even if a later input remains valid.
   private val savedUret = Option.when(HasFDI)(RegEnable(isUret, false.B, io.in.fire))
-  private val waitingUret = savedUret.getOrElse(false.B) && !csrMod.io.in.ready
-  when (io.in.valid && !waitingUret) {
+  // A busy CSR slot owns its saved ROB identity even when a younger request is
+  // presented. Cancellation of that younger request cannot discard this response.
+  when (io.in.valid && csrMod.io.in.ready) {
     thisRobIdx := io.in.bits.ctrl.robIdx
   }.otherwise {
     thisRobIdx := robIdxReg
@@ -137,6 +137,12 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       in.bits.addr := addr
       in.bits.src := src
       in.bits.wdata := wdataReg
+      // DataPath supplies the FTQ start address; offset and base travel with the
+      // same issued instruction. Recover its RV64 PC using its fetch translation.
+      val instructionPc = io.in.bits.data.pc.get + (io.in.bits.ctrl.ftqOffset.get << instOffsetBits)
+      val translation = csrMod.io.status.instrAddrTransType
+      in.bits.sourcePc := Mux(translation.sv39, SignExt(instructionPc(38, 0), XLEN),
+        Mux(translation.sv48, SignExt(instructionPc(47, 0), XLEN), ZeroExt(instructionPc, XLEN)))
       in.bits.mret := isMret
       in.bits.mnret := isMNret
       in.bits.sret := isSret

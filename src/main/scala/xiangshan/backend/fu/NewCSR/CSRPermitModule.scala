@@ -89,10 +89,17 @@ class CSRPermitModule(implicit val p: Parameters) extends Module with HasXSParam
     )
   } else false.B
 
-  val directPermit_illegal = mPermit_EX_II || sPermit_EX_II || pPermit_EX_II || pPermit_EX_VI || vPermit_EX_II || vPermit_EX_VI || userTimerPermit_EX_II
+  // FDI checks use the accepted instruction's PC and the bank's pre-write state.
+  // Host-only FDI addresses must report II even when generic guest checks report VI.
+  // Existing custom-CSR checks own M/S state-enable permission for these addresses.
+  private val fdiPermit_EX_II = io.in.fdiSelected && (
+    io.in.privState.isVirtual || io.in.fdiNotTrusted
+  )
+
+  val directPermit_illegal = mPermit_EX_II || sPermit_EX_II || pPermit_EX_II || pPermit_EX_VI || vPermit_EX_II || vPermit_EX_VI || userTimerPermit_EX_II || fdiPermit_EX_II
 
   val csrAccess_EX_II = csrAccess && (
-    (mPermit_EX_II || sPermit_EX_II || pPermit_EX_II || vPermit_EX_II || userTimerPermit_EX_II) ||
+    (mPermit_EX_II || sPermit_EX_II || pPermit_EX_II || vPermit_EX_II || userTimerPermit_EX_II || fdiPermit_EX_II) ||
     (!directPermit_illegal && indirectPermit_EX_II)
   )
   val csrAccess_EX_VI = csrAccess && (
@@ -629,6 +636,8 @@ class CSRPermitIO extends Bundle {
     val debugMode = Bool()
     val userHandler = Bool()
     val userTimerEnabled = Bool()
+    val fdiSelected = Bool()
+    val fdiNotTrusted = Bool()
     val xRet = new xRetIO
     val status = new statusIO
     val xcounteren = new xcounterenIO

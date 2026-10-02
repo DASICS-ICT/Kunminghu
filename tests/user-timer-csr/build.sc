@@ -111,12 +111,12 @@ object production extends ProductionModule {
 
   object test extends ScalaTests with TestModule.ScalaTest {
     override def sources = T.sources {
-      Seq("HasFDIConfigurationTest.scala", "UserTimerCSRTest.scala", "UserTimerCSRIntegrationTest.scala", "UserTimerDecodeTest.scala", "UserTimerTest.scala")
+      Seq("HasFDIConfigurationTest.scala", "UserTimerCSRTest.scala", "UserTimerCSRIntegrationTest.scala", "UserTimerDecodeTest.scala", "UserTimerTest.scala", "FDICSRIntegrationTest.scala")
         .map(name => PathRef(sourceRoot / "src/test/scala/xiangshan/backend/fu" / name))
     }
     override def ivyDeps = Agg(ivy"edu.berkeley.cs::chiseltest:6.0.0")
     override def scalacOptions = super.scalacOptions() ++ Agg("-language:reflectiveCalls")
-    override def forkArgs = Seq("-Xmx12G", "-Xss32m", s"-Duit02.runRoot=$runRoot", s"-Duit01.runRoot=$runRoot")
+    override def forkArgs = Seq("-Xmx12G", "-Xss32m", s"-Duit02.runRoot=$runRoot", s"-Duit01.runRoot=$runRoot", s"-Dc05.runRoot=$runRoot")
     // Verilator 5.020's generated PCH flags conflict with the additional harness include.
     override def forkEnv = T {
       super.forkEnv() ++ Map("MAKEFLAGS" -> "VK_PCH_I_FAST= VK_PCH_I_SLOW=")
@@ -124,4 +124,13 @@ object production extends ProductionModule {
     override def testSandboxWorkingDir = false
     override def forkWorkingDir = runRoot
   }
+}
+
+// The production Backend is generated separately from the small CSR simulations.
+object backend extends ProductionModule {
+  override def sources = T.sources(Seq(
+    PathRef(sourceRoot / "src/test/scala/top/C05BackendElaboration.scala")))
+  override def moduleDeps = Seq(production)
+  override def forkArgs = Seq("-Xmx48G", "-Xss32m")
+  override def forkWorkingDir = runRoot
 }

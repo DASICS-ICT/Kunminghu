@@ -78,6 +78,8 @@ class NewCSRInput(implicit p: Parameters) extends Bundle {
   val addr = UInt(12.W)
   val src = UInt(64.W)
   val wdata = UInt(64.W)
+  // Full start PC of the accepted CSR instruction, not an exception or fetch PC.
+  val sourcePc = UInt(64.W)
   val mnret = Input(Bool())
   val mret = Input(Bool())
   val sret = Input(Bool())
@@ -359,7 +361,20 @@ class NewCSR(implicit val p: Parameters) extends Module
   } else false.B
   // Bank requests have their own accepted write selection. Do not dispatch their delayed
   // write pulse using a subsequent live address through any legacy CSR consumer.
-  private val wenLegalReg = GatedValidRegNext(wenLegal && !userTimerAddressHit)
+  private val fdiMainCfg = Option.when(HasFDI)(new FDIMainCfgBank)
+  private val fdiBounds = Option.when(HasFDI)(new FDIBoundRegisterBank)
+  private val fdiSpecial = Option.when(HasFDI)(new FDISpecialRegisterBank)
+  private val fdiRwEntries = fdiMainCfg.toSeq.flatMap(_.csrRwMap.toSeq) ++
+    fdiBounds.toSeq.flatMap(_.csrRwMap.toSeq) ++ fdiSpecial.toSeq.flatMap(_.csrRwMap.toSeq)
+  private val fdiOutEntries = fdiMainCfg.toSeq.flatMap(_.csrOutMap.toSeq) ++
+    fdiBounds.toSeq.flatMap(_.csrOutMap.toSeq) ++ fdiSpecial.toSeq.flatMap(_.csrOutMap.toSeq)
+  require(fdiRwEntries.map(_._1).distinct.size == fdiRwEntries.size,
+    "FDI CSR groups must have unique address views")
+  require(fdiOutEntries.map(_._1) == fdiRwEntries.map(_._1))
+  private val fdiCSRMap = SeqMap.from(fdiRwEntries)
+  private val fdiCSROutMap = SeqMap.from(fdiOutEntries)
+  private val fdiAddressHit = fdiCSRMap.keys.map(address => addr === address.U).foldLeft(false.B)(_ || _)
+  private val wenLegalReg = GatedValidRegNext(wenLegal && !userTimerAddressHit && !fdiAddressHit)
 
   var csrRwMap: SeqMap[Int, (CSRAddrWriteBundle[_], UInt)] =
     machineLevelCSRMap ++
@@ -376,6 +391,9 @@ class NewCSR(implicit val p: Parameters) extends Module
   require((csrRwMap.keySet intersect userTimerCSRMap.keySet).isEmpty,
     "User timer CSR addresses overlap an implemented CSR")
   csrRwMap ++= userTimerCSRMap
+  require((csrRwMap.keySet intersect fdiCSRMap.keySet).isEmpty,
+    "FDI CSR addresses overlap an implemented CSR")
+  csrRwMap ++= fdiCSRMap
 
   val csrMods: Seq[CSRModule[_]] =
     machineLevelCSRMods ++
@@ -388,7 +406,10 @@ class NewCSR(implicit val p: Parameters) extends Module
     customCSRMods ++
     pmpCSRMods ++
     pmaCSRMods ++
-    userTimerCSRMods
+    userTimerCSRMods ++
+    fdiMainCfg.toSeq.flatMap(_.csrMods) ++
+    fdiBounds.toSeq.flatMap(_.csrMods) ++
+    fdiSpecial.toSeq.flatMap(_.csrMods)
 
   var csrOutMap: SeqMap[Int, UInt] =
     machineLevelCSROutMap ++
@@ -405,6 +426,9 @@ class NewCSR(implicit val p: Parameters) extends Module
   require((csrOutMap.keySet intersect userTimerCSROutMap.keySet).isEmpty,
     "User timer CSR addresses overlap an implemented CSR readout")
   csrOutMap ++= userTimerCSROutMap
+  require((csrOutMap.keySet intersect fdiCSROutMap.keySet).isEmpty,
+    "FDI CSR addresses overlap an implemented CSR readout")
+  csrOutMap ++= fdiCSROutMap
 
   // interrupt
   val nmip = RegInit(new NonMaskableIRPendingBundle, (new NonMaskableIRPendingBundle).init)
@@ -574,7 +598,7 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   // Todo: all wen and wdata of CSRModule assigned in this for loop
   for ((id, (wBundle, _)) <- csrRwMap) {
-    if (HasFDI && UserTimerCSRAddress.all.contains(id)) {
+    if (HasFDI && (UserTimerCSRAddress.all.contains(id) || fdiCSRMap.contains(id))) {
       // The wrapper captures final RMW data on fire. Keep this address selection aligned
       // with that data for the following write edge, including bubbles and output stalls.
       val acceptedWrite = RegNext(io.in.fire && wenLegal && addr === id.U && !redirectFlush, false.B)
@@ -604,6 +628,21 @@ class NewCSR(implicit val p: Parameters) extends Module
   permitMod.io.in.debugMode := debugMode
   permitMod.io.in.userHandler := userInHandler.getOrElse(false.B)
   permitMod.io.in.userTimerEnabled := HasFDI.B
+  permitMod.io.in.fdiSelected := fdiAddressHit
+  permitMod.io.in.fdiNotTrusted := false.B
+  if (HasFDI) {
+    val trust = Module(new xiangshan.backend.fu.FDIPcTrustChecker)
+    trust.io.pc := io.in.bits.sourcePc
+    trust.io.sourcePrivilege := privState.PRVM.asUInt
+    trust.io.sourceVirtual := privState.isVirtual
+    trust.io.sEnable := fdiMainCfg.get.mainCfg.regOut.sEnable.asBool
+    trust.io.uEnable := fdiMainCfg.get.mainCfg.regOut.uEnable.asBool
+    trust.io.sBoundLo := fdiBounds.get.sMainBoundLo.regOut.asUInt
+    trust.io.sBoundHi := fdiBounds.get.sMainBoundHi.regOut.asUInt
+    trust.io.uBoundLo := fdiBounds.get.uMainBoundLo.regOut.asUInt
+    trust.io.uBoundHi := fdiBounds.get.uMainBoundHi.regOut.asUInt
+    permitMod.io.in.fdiNotTrusted := trust.io.notTrusted
+  }
   permitMod.io.in.xRet.uret := io.in.bits.uret && valid
 
   permitMod.io.in.xRet.mnret := io.in.bits.mnret && valid
@@ -1645,7 +1684,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   assert(PopCount(io.status.instrAddrTransType.asUInt) === 1.U, "Exactly one inst trans type should be asserted")
 
   // A bank read must not become an indirect AIA request when the live address changes.
-  private val csrAccess = wenLegalReg || RegNext(ren && !userTimerAddressHit)
+  private val csrAccess = wenLegalReg || RegNext(ren && !userTimerAddressHit && !fdiAddressHit)
 
   private val imsicAddrValid =
     csrAccess &&  addr === CSRs.mireg.U &&  miselect.inIMSICRange ||

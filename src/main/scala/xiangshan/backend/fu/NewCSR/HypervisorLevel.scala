@@ -264,6 +264,8 @@ class HgeipBundle(implicit val p: Parameters) extends CSRBundle with HasSoCParam
 
 class HedelegBundle extends ExceptionBundle {
   this.getALL.foreach(_.setRW().withReset(0.U))
+  // Host DASICS faults cannot be delegated to a guest.
+  this.getDASICS.foreach(_.setRO().withReset(0.U))
   // The default configs are RW
   this.EX_HSCALL.setRO().withReset(0.U)
   this.EX_VSCALL.setRO().withReset(0.U)

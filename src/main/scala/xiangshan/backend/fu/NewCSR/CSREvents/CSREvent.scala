@@ -121,6 +121,7 @@ trait CSREventBase {
 
 class TrapEntryEventInput(implicit val p: Parameters) extends Bundle with HasXSParameter {
   val causeNO = Input(new CauseBundle)
+  val fdiException = Option.when(HasFDI)(Input(new xiangshan.backend.FDIExceptionRecord))
   val trapPc = Input(UInt(VaddrMaxWidth.W))
   val trapPcGPA = Input(UInt(PAddrBitsMax.W))
   val trapInst = Input(ValidIO(UInt(InstWidth.W)))

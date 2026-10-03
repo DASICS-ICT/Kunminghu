@@ -161,8 +161,9 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   csrMod.io.fromRob.trap.bits.instr := csrIn.exception.bits.instr
   csrMod.io.fromRob.trap.bits.pcGPA := csrIn.exception.bits.gpaddr
   // Todo: shrink the width of trap vector.
-  // We use 64bits trap vector in CSR, and 24 bits exceptionVec in exception bundle.
+  // CSR keeps a 64-bit trap vector while the pipeline carries its implemented bits.
   csrMod.io.fromRob.trap.bits.trapVec := csrIn.exception.bits.exceptionVec.asUInt
+  csrMod.io.fromRob.trap.bits.fdiException.foreach(_ := csrIn.exception.bits.fdiException.get)
   csrMod.io.fromRob.trap.bits.isFetchBkpt := csrIn.exception.bits.isPcBkpt
   csrMod.io.fromRob.trap.bits.singleStep := csrIn.exception.bits.singleStep
   csrMod.io.fromRob.trap.bits.crossPageIPFFix := csrIn.exception.bits.crossPageIPFFix

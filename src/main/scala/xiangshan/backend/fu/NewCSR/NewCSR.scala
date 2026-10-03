@@ -149,6 +149,7 @@ class NewCSR(implicit val p: Parameters) extends Module
         val pcGPA = UInt(PAddrBitsMax.W)
         val instr = UInt(InstWidth.W)
         val trapVec = UInt(64.W)
+        val fdiException = Option.when(HasFDI)(new xiangshan.backend.FDIExceptionRecord)
         val isFetchBkpt = Bool()
         val singleStep = Bool()
         val trigger = TriggerAction()
@@ -1001,10 +1002,22 @@ class NewCSR(implicit val p: Parameters) extends Module
   trapEntryHSEvent.valid  := hasTrap && entryPrivState.isModeHS && !entryDebugMode && !debugMode && mnstatus.regOut.NMIE
   trapEntryVSEvent.valid  := hasTrap && entryPrivState.isModeVS && !entryDebugMode && !debugMode && mnstatus.regOut.NMIE
 
+  if (HasFDI) {
+    // Use the actual cause write events: double-trap and debug routing may
+    // replace or suppress the synchronous cause selected by TrapHandleModule.
+    val committedFDITrap = Seq(trapEntryMEvent.out.mcause, trapEntryHSEvent.out.scause).map { event =>
+      event.valid && !event.bits.Interrupt.asBool &&
+        (event.bits.ExceptionCode.asUInt === dasicsU.U || event.bits.ExceptionCode.asUInt === dasicsS.U)
+    }.reduce(_ || _)
+    fdiSpecial.get.fReason.trapReason.valid := committedFDITrap
+    fdiSpecial.get.fReason.trapReason.bits.REASON := io.fromRob.trap.bits.fdiException.get.reason
+  }
+
   Seq(trapEntryMEvent, trapEntryMNEvent, trapEntryHSEvent, trapEntryVSEvent, trapEntryDEvent).foreach { eMod =>
     eMod.in match {
       case in: TrapEntryEventInput =>
         in.causeNO := trapHandleMod.io.out.causeNO
+        in.fdiException.foreach(_ := io.fromRob.trap.bits.fdiException.get)
         in.trapPc := trapPC
         in.trapPcGPA := trapPCGPA // only used by trapEntryMEvent & trapEntryHSEvent
         in.trapInst := io.trapInst

@@ -44,7 +44,7 @@ trait MachineLevel { self: NewCSR =>
 
   println(s"[CSR] supported isa ext: ${misa.bundle.getISAString}")
 
-  val medeleg = Module(new CSRModule("Medeleg", new MedelegBundle))
+  val medeleg = Module(new CSRModule("Medeleg", new MedelegBundle(HasFDI)))
     .setAddr(CSRs.medeleg)
 
   val mideleg = Module(new CSRModule("Mideleg", new MidelegBundle))
@@ -593,8 +593,9 @@ class MisaBundle(val hasFDI: Boolean = false) extends CSRBundle {
   def getISAString = this.getFields.filter(x => x != MXL && x.init.litValue == 1).sortBy(_.lsb).map(x => ('A' + x.msb).toChar).mkString
 }
 
-class MedelegBundle extends ExceptionBundle {
+class MedelegBundle(val hasFDI: Boolean = false) extends ExceptionBundle {
   this.getALL.foreach(_.setRW().withReset(0.U))
+  if (!hasFDI) this.getDASICS.foreach(_.setRO().withReset(0.U))
   this.EX_MCALL.setRO().withReset(0.U) // never delegate machine level ecall
   this.EX_DBLTRP.setRO().withReset(0.U)// double trap is not delegatable
 }

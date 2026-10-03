@@ -37,6 +37,10 @@ class TrapEntryMEventModule(implicit val p: Parameters) extends Module with CSRE
   private val highPrioTrapNO = in.causeNO.ExceptionCode.asUInt
   private val isException = !in.causeNO.Interrupt.asBool
   private val isInterrupt = in.causeNO.Interrupt.asBool
+  // TVAL follows the original selected exception even when double-trap
+  // handling changes the final M cause. FReason uses that final cause instead.
+  private val isFDIException = in.fdiException.map(_ => isException &&
+    (highPrioTrapNO === ExceptionNO.dasicsU.U || highPrioTrapNO === ExceptionNO.dasicsS.U)).getOrElse(false.B)
 
   private val trapPC = genTrapVA(
     iMode,
@@ -116,10 +120,11 @@ class TrapEntryMEventModule(implicit val p: Parameters) extends Module with CSRE
   out.mstatus.bits.MPIE         := current.mstatus.MIE
   out.mstatus.bits.MIE          := 0.U
   out.mstatus.bits.MDT          := 1.U
-  out.mepc.bits.epc             := Mux(isFetchMalAddr, in.fetchMalTval(63, 1), trapPC(63, 1))
+  out.mepc.bits.epc             := Mux(isFetchMalAddr && !isFDIException, in.fetchMalTval(63, 1), trapPC(63, 1))
   out.mcause.bits.Interrupt     := isInterrupt
   out.mcause.bits.ExceptionCode := Mux(isDTExcp, ExceptionNO.EX_DT.U, highPrioTrapNO)
-  out.mtval.bits.ALL            := Mux(isFetchMalAddrExcp, in.fetchMalTval, tval)
+  out.mtval.bits.ALL            := Mux(isFDIException, in.fdiException.map(_.tval).getOrElse(0.U),
+    Mux(isFetchMalAddrExcp, in.fetchMalTval, tval))
   out.mtval2.bits.ALL           := Mux(isDTExcp, precause, tval2 >> 2)
   out.mtinst.bits.ALL           := Mux(isFetchGuestExcp && in.trapIsForVSnonLeafPTE || isLSGuestExcp && in.memExceptionIsForVSnonLeafPTE, 0x3000.U, 0.U)
   out.targetPc.bits.pc          := in.pcFromXtvec

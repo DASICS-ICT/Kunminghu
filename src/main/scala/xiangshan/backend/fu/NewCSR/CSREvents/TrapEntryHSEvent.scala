@@ -39,6 +39,10 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
   private val highPrioTrapNO = in.causeNO.ExceptionCode.asUInt
   private val isException = !in.causeNO.Interrupt.asBool
   private val isInterrupt = in.causeNO.Interrupt.asBool
+  // A selected FDI exception owns its complete rejected address and source PC;
+  // backend fetch-target metadata belongs to a different exception class.
+  private val isFDIException = in.fdiException.map(_ => isException &&
+    (highPrioTrapNO === ExceptionNO.dasicsU.U || highPrioTrapNO === ExceptionNO.dasicsS.U)).getOrElse(false.B)
 
   private val trapPC = genTrapVA(
     iMode,
@@ -129,10 +133,11 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
     // SPVP is not PrivMode enum type, so asUInt and shrink the width
   out.hstatus.bits.SPVP         := Mux(!current.privState.isVirtual, in.hstatus.SPVP.asUInt, current.privState.PRVM.asUInt(0, 0))
   out.hstatus.bits.GVA          := tvalFillGVA
-  out.sepc.bits.epc             := Mux(isFetchMalAddr, in.fetchMalTval(63, 1), trapPC(63, 1))
+  out.sepc.bits.epc             := Mux(isFetchMalAddr && !isFDIException, in.fetchMalTval(63, 1), trapPC(63, 1))
   out.scause.bits.Interrupt     := isInterrupt
   out.scause.bits.ExceptionCode := highPrioTrapNO
-  out.stval.bits.ALL            := Mux(isFetchMalAddrExcp, in.fetchMalTval, tval)
+  out.stval.bits.ALL            := Mux(isFDIException, in.fdiException.map(_.tval).getOrElse(0.U),
+    Mux(isFetchMalAddrExcp, in.fetchMalTval, tval))
   out.htval.bits.ALL            := tval2 >> 2
   out.htinst.bits.ALL           := Mux(isFetchGuestExcp && in.trapIsForVSnonLeafPTE || isLSGuestExcp && in.memExceptionIsForVSnonLeafPTE, 0x3000.U, 0.U)
   out.targetPc.bits.pc          := in.pcFromXtvec

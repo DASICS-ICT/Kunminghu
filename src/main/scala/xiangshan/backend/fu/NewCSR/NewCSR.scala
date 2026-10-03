@@ -620,6 +620,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     }
   }
 
+  private val fdiSoftwareWriteEffect = WireDefault(false.B)
+
   if (HasFDI) {
     // Normalize once at the accepted write effect. The same final word drives
     // its native owner and the distribution bus; mirrors perform no CSR RMW.
@@ -643,7 +645,8 @@ class NewCSR(implicit val p: Parameters) extends Module
     val effects = fdiCSRMap.toSeq.map { case (address, (port, _)) => address -> port.wen }
     val finalData = Mux1H(effects.map { case (address, effect) => effect -> finalWords(address) })
     val distribution = io.distributedFDI.get.w
-    distribution.valid := effects.map(_._2).reduce(_ || _)
+    fdiSoftwareWriteEffect := effects.map(_._2).reduce(_ || _)
+    distribution.valid := fdiSoftwareWriteEffect
     distribution.bits.addr := Mux1H(effects.map { case (address, effect) => effect -> address.U(12.W) })
     distribution.bits.data := finalData
     fdiCSRMap.values.foreach { case (port, _) => port.wdata := finalData }
@@ -1197,9 +1200,21 @@ class NewCSR(implicit val p: Parameters) extends Module
   val frmChange = fcsr.wAliasFfm.wen && (!frmIsReserved && frmWdataReserved || frmIsReserved && !frmWdataReserved) ||
     fcsr.w.wen && (!frmIsReserved && fcsrWdataReserved || frmIsReserved && !fcsrWdataReserved)
 
+  private val fdiWriteNeedsFlush = if (HasFDI) {
+    // The C1 software effect is single-cycle, while its response may remain stalled.
+    // Cancellation or acceptance clears ownership before another event can be saved.
+    val pending = RegInit(false.B)
+    when(redirectFlush || io.in.fire || io.out.fire) {
+      pending := false.B
+    }.elsewhen(fdiSoftwareWriteEffect) {
+      pending := true.B
+    }
+    (fdiSoftwareWriteEffect || pending) && !redirectFlush && !reset.asBool
+  } else false.B
+
   val flushPipe = resetSatp ||
     triggerFrontendChange || floatStatusOnOff || vectorStatusOnOff ||
-    vstartChange || frmChange
+    vstartChange || frmChange || fdiWriteNeedsFlush
 
   /**
    * Look up id in vsMapS and sMapVS.

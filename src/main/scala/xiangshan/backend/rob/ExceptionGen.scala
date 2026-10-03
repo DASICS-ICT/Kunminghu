@@ -46,6 +46,17 @@ class ExceptionGen(params: BackendParams)(implicit p: Parameters) extends XSModu
   })
 
   val wbExuParams = params.allExuParams.filter(_.exceptionOut.nonEmpty)
+  (io.enq ++ io.wb).foreach { candidate =>
+    if (HasFDI) {
+      xiangshan.backend.FDIExceptionRecord.check(candidate.valid,
+        candidate.bits.exceptionVec, candidate.bits.fdiException.get)
+    } else {
+      when(candidate.valid) {
+        assert(!xiangshan.backend.FDIExceptionRecord.pending(candidate.bits.exceptionVec),
+          "A disabled DASICS implementation cannot report a DASICS fault")
+      }
+    }
+  }
 
   def getOldest(valid: Seq[Bool], bits: Seq[RobExceptionInfo]): RobExceptionInfo = {
     def getOldest_recursion(valid: Seq[Bool], bits: Seq[RobExceptionInfo]): (Seq[Bool], Seq[RobExceptionInfo]) = {
@@ -86,13 +97,19 @@ class ExceptionGen(params: BackendParams)(implicit p: Parameters) extends XSModu
   }
 
   // s0: compare wb in 6 groups
-  val csr_wb = io.wb.zip(wbExuParams).filter(_._2.fuConfigs.filter(t => t.isCsr).nonEmpty).map(_._1)
+  val csr_wb = io.wb.zip(wbExuParams).filter(_._2.fuConfigs.exists(t => t.isCsr || t.isJmp || t.isBrh)).map(_._1)
   val load_wb = io.wb.zip(wbExuParams).filter(_._2.fuConfigs.filter(_.fuType == FuType.ldu).nonEmpty).map(_._1)
   val store_wb = io.wb.zip(wbExuParams).filter(_._2.fuConfigs.filter(t => t.isSta || t.fuType == FuType.mou).nonEmpty).map(_._1)
   val varith_wb = io.wb.zip(wbExuParams).filter(_._2.fuConfigs.filter(_.isVecArith).nonEmpty).map(_._1)
   val vls_wb = io.wb.zip(wbExuParams).filter(_._2.fuConfigs.exists(x => FuType.FuTypeOrR(x.fuType, FuType.vecMem))).map(_._1)
 
   val writebacks = Seq(csr_wb, load_wb, store_wb, varith_wb, vls_wb)
+  require(wbExuParams.length == io.wb.length, "Exception writeback inventory must match the IO")
+  require(writebacks.forall(_.nonEmpty), "Every supported exception selection group must be nonempty")
+  io.wb.zipWithIndex.foreach { case (port, index) =>
+    require(writebacks.flatten.count(_ eq port) == 1,
+      s"Exception writeback port $index must belong to exactly one selection group")
+  }
   val in_wb_valids = writebacks.map(_.map(w => w.valid && w.bits.has_exception && !lastCycleFlush))
   val wb_valid = in_wb_valids.zip(writebacks).map { case (valid, wb) =>
     valid.zip(wb.map(_.bits)).map { case (v, bits) => v && !(bits.robIdx.needFlush(io.redirect) || io.flush) }.reduce(_ || _)
@@ -130,12 +147,16 @@ class ExceptionGen(params: BackendParams)(implicit p: Parameters) extends XSModu
         current.isEnqExcp := false.B
       }.elsewhen (current.robIdx === s1_out_bits.robIdx) {
         current.exceptionVec := Mux(isVecUpdate, s1_out_bits.exceptionVec, current.exceptionVec)
+        current.fdiException.foreach { record =>
+          record := Mux(isVecUpdate, s1_out_bits.fdiException.get, record)
+        }
         current.hasException := Mux(isVecUpdate, s1_out_bits.hasException, current.hasException)
         current.flushPipe := (s1_out_bits.flushPipe || current.flushPipe) && !s1_out_bits.exceptionVec.asUInt.orR
         current.replayInst := s1_out_bits.replayInst || current.replayInst
         current.singleStep := s1_out_bits.singleStep || current.singleStep
         current.trigger   := Mux(isVecUpdate, s1_out_bits.trigger,    current.trigger)
         current.vstart    := Mux(isVecUpdate, s1_out_bits.vstart,     current.vstart)
+        current.vuopIdx   := Mux(isVecUpdate, s1_out_bits.vuopIdx,    current.vuopIdx)
         current.vstartEn  := Mux(isVecUpdate, s1_out_bits.vstartEn,   current.vstartEn)
         current.isVecLoad := Mux(isVecUpdate, s1_out_bits.isVecLoad,  current.isVecLoad)
         current.isVlm     := Mux(isVecUpdate, s1_out_bits.isVlm,      current.isVlm)

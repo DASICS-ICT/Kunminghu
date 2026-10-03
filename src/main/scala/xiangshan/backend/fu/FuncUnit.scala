@@ -7,6 +7,7 @@ import utility._
 import utils.OptionWrapper
 import xiangshan._
 import xiangshan.backend.Bundles.VPUCtrlSignals
+import xiangshan.backend.FDIExceptionRecord
 import xiangshan.backend.rob.RobPtr
 import xiangshan.frontend.{FtqPtr, PreDecodeInfo}
 import xiangshan.backend.datapath.DataConfig._
@@ -45,6 +46,7 @@ class FuncUnitCtrlOutput(cfg: FuConfig)(implicit p: Parameters) extends XSBundle
   val v0Wen         = OptionWrapper(cfg.needV0Wen, Bool())
   val vlWen         = OptionWrapper(cfg.needVlWen, Bool())
   val exceptionVec  = OptionWrapper(cfg.exceptionOut.nonEmpty, ExceptionVec())
+  val fdiException  = Option.when(HasFDI && cfg.exceptionOut.nonEmpty)(new FDIExceptionRecord)
   val flushPipe     = OptionWrapper(cfg.flushPipe,  Bool())
   val replay        = OptionWrapper(cfg.replayInst, Bool())
   val preDecode     = OptionWrapper(cfg.hasPredecode, new PreDecodeInfo)
@@ -105,6 +107,11 @@ class FuncUnitIO(cfg: FuConfig)(implicit p: Parameters) extends XSBundle {
 
 abstract class FuncUnit(val cfg: FuConfig)(implicit p: Parameters) extends XSModule with HasCriticalErrors {
   val io = IO(new FuncUnitIO(cfg))
+  // Fault producers override this payload together with their exception vector.
+  io.out.bits.ctrl.fdiException.foreach(record => record := 0.U.asTypeOf(record))
+  if (cfg.isJmp || cfg.isBrh) {
+    io.out.bits.ctrl.exceptionVec.foreach(_ := ExceptionVec(false.B))
+  }
   PerfCCT.updateInstPos(io.in.bits.debug_seqNum, PerfCCT.InstPos.AtFU.id.U, io.in.valid, clock, reset)
   PerfCCT.updateInstPos(io.out.bits.debug_seqNum, PerfCCT.InstPos.AtBypassVal.id.U, io.out.valid, clock, reset)
   val criticalErrors = Seq(("none", false.B))
@@ -248,8 +255,8 @@ trait HasPipelineReg { this: FuncUnit =>
   io.out.bits.perfDebugInfo := fixPerfVec.last
   io.out.bits.debug_seqNum := fixSeqNumVec.last
 
-  // vstart illegal
-  if (cfg.exceptionOut.nonEmpty) {
+  // Scalar exception producers have no vector control or vstart constraint.
+  if (cfg.exceptionOut.nonEmpty && cfg.needVecCtrl) {
     val outVstart = ctrlVec.last.vpu.get.vstart
     val vstartIllegal = outVstart =/= 0.U
     io.out.bits.ctrl.exceptionVec.get := 0.U.asTypeOf(io.out.bits.ctrl.exceptionVec.get)

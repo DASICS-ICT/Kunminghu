@@ -175,6 +175,7 @@ object Bundles {
     val pc              = UInt(VAddrBits.W)
     val foldpc          = UInt(MemPredPCWidth.W)
     val exceptionVec    = ExceptionVec()
+    val fdiException    = Option.when(HasFDI)(new FDIExceptionRecord)
     val isFetchMalAddr  = Bool()
     val hasException    = Bool()
     val trigger         = TriggerAction()
@@ -283,6 +284,9 @@ object Bundles {
       replayInst   : Boolean = false
     ): DynInst = {
       this.exceptionVec.zipWithIndex.filterNot(x => exceptionBits.contains(x._2)).foreach(_._1 := false.B)
+      if (!exceptionBits.exists(Seq(ExceptionNO.dasicsU, ExceptionNO.dasicsS).contains)) {
+        this.fdiException.foreach(record => record := 0.U.asTypeOf(record))
+      }
       if (!flushPipe) { this.flushPipe := false.B }
       if (!replayInst) { this.replayInst := false.B }
       this
@@ -711,6 +715,7 @@ object Bundles {
     val wflags       = if (params.writeFflags)  Some(Bool())                  else None
     val vxsat        = if (params.writeVxsat)   Some(Bool())                  else None
     val exceptionVec = if (params.exceptionOut.nonEmpty) Some(ExceptionVec()) else None
+    val fdiException = Option.when(HasFDI && params.exceptionOut.nonEmpty)(new FDIExceptionRecord)
     val flushPipe    = if (params.flushPipe)    Some(Bool())                  else None
     val replay       = if (params.replayInst)   Some(Bool())                  else None
     val lqIdx        = if (params.hasLoadFu)    Some(new LqPtr())             else None
@@ -863,6 +868,7 @@ object Bundles {
     val instr = UInt(32.W)
     val commitType = CommitType()
     val exceptionVec = ExceptionVec()
+    val fdiException = Option.when(HasFDI)(new FDIExceptionRecord)
     val isPcBkpt = Bool()
     val isFetchMalAddr = Bool()
     val gpaddr = UInt(XLEN.W)

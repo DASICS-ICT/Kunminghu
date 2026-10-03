@@ -202,6 +202,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     uop.regCacheIdx   := DontCare
     uop.traceBlockInPipe := DontCare
     uop.isDropAmocasSta := DontCare
+    uop.fdiException.foreach(record => record := 0.U.asTypeOf(record))
   })
   private val inst         = Wire(Vec(RenameWidth, new XSInstBitFields))
   private val isCsr        = Wire(Vec(RenameWidth, Bool()))

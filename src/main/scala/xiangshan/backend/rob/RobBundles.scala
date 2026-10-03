@@ -292,6 +292,7 @@ class RobExceptionInfo(implicit p: Parameters) extends XSBundle {
   // 0: is execute exception, 1: is fetch exception
   val isEnqExcp = Bool()
   val exceptionVec = ExceptionVec()
+  val fdiException = Option.when(HasFDI)(new xiangshan.backend.FDIExceptionRecord)
   val isFetchMalAddr = Bool()
   val flushPipe = Bool()
   val isVset = Bool()

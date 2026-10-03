@@ -232,6 +232,7 @@ object FuConfig {
     piped = true,
     writeIntRf = true,
     immType = Set(SelImm.IMM_I, SelImm.IMM_UJ, SelImm.IMM_U),
+    exceptionOut = Seq(dasicsU, dasicsS),
   )
 
   val BrhCfg: FuConfig = FuConfig (
@@ -243,6 +244,7 @@ object FuConfig {
     ),
     piped = true,
     immType = Set(SelImm.IMM_SB),
+    exceptionOut = Seq(dasicsU, dasicsS),
   )
 
   val I2fCfg: FuConfig = FuConfig (
@@ -303,7 +305,7 @@ object FuConfig {
     piped = false,
     writeIntRf = true,
     latency = UncertainLatency(),
-    exceptionOut = Seq(illegalInstr, virtualInstr, breakPoint, ecallU, ecallS, ecallVS, ecallM),
+    exceptionOut = Seq(illegalInstr, virtualInstr, breakPoint, ecallU, ecallS, ecallVS, ecallM, dasicsU, dasicsS),
     flushPipe = true,
   )
 
@@ -423,7 +425,7 @@ object FuConfig {
     writeIntRf = true,
     writeFpRf = true,
     latency = UncertainLatency(3),
-    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault, breakPoint, hardwareError),
+    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault, breakPoint, hardwareError, dasicsU, dasicsS),
     flushPipe = true,
     replayInst = true,
     hasLoadError = true,
@@ -440,7 +442,7 @@ object FuConfig {
     ),
     piped = false,
     latency = UncertainLatency(),
-    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault, breakPoint),
+    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault, breakPoint, dasicsU, dasicsS),
     flushPipe = true,
     trigger = true,
     immType = Set(SelImm.IMM_S),
@@ -469,7 +471,7 @@ object FuConfig {
     writeIntRf = true,
     writeFpRf = true,
     latency = UncertainLatency(3),
-    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault),
+    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault, dasicsU, dasicsS),
     flushPipe = true,
     replayInst = true,
     hasLoadError = true,
@@ -485,7 +487,7 @@ object FuConfig {
     ),
     piped = false,
     latency = UncertainLatency(),
-    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault),
+    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault, dasicsU, dasicsS),
     immType = Set(SelImm.IMM_S),
   )
 
@@ -496,7 +498,7 @@ object FuConfig {
     srcData = Seq(),
     piped = false,
     latency = UncertainLatency(),
-    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault),
+    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault, dasicsU, dasicsS),
     immType = Set(),
   )
 
@@ -766,7 +768,7 @@ object FuConfig {
     writeV0Rf = true,
     writeVlRf = true,
     latency = UncertainLatency(),
-    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault, breakPoint),
+    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, loadGuestPageFault, breakPoint, dasicsU, dasicsS),
     flushPipe = true,
     replayInst = true,
     trigger = true,
@@ -785,7 +787,7 @@ object FuConfig {
     ),
     piped = false,
     latency = UncertainLatency(),
-    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault, breakPoint),
+    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, storeGuestPageFault, breakPoint, dasicsU, dasicsS),
     flushPipe = true,
     replayInst = true,
     trigger = true,
@@ -807,7 +809,7 @@ object FuConfig {
     writeV0Rf = true,
     writeVlRf = true,
     latency = UncertainLatency(),
-    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, breakPoint),
+    exceptionOut = Seq(loadAddrMisaligned, loadAccessFault, loadPageFault, breakPoint, dasicsU, dasicsS),
     flushPipe = true,
     replayInst = true,
     trigger = true,
@@ -826,7 +828,7 @@ object FuConfig {
     ),
     piped = false,
     latency = UncertainLatency(),
-    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, breakPoint),
+    exceptionOut = Seq(storeAddrMisaligned, storeAccessFault, storePageFault, breakPoint, dasicsU, dasicsS),
     flushPipe = true,
     replayInst = true,
     trigger = true,

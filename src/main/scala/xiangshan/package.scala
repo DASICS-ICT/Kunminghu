@@ -187,7 +187,7 @@ package object xiangshan {
   }
 
   object ExceptionVec {
-    val ExceptionVecSize = 24
+    val ExceptionVecSize = 26
     def apply() = Vec(ExceptionVecSize, Bool())
     def apply(init: Bool) = VecInit(Seq.fill(ExceptionVecSize)(init))
   }
@@ -844,6 +844,8 @@ package object xiangshan {
     def loadGuestPageFault  = 21
     def virtualInstr        = 22
     def storeGuestPageFault = 23
+    def dasicsU             = 24
+    def dasicsS             = 25
 
     // Just alias
     def EX_IAM    = instrAddrMisaligned
@@ -901,7 +903,9 @@ package object xiangshan {
       loadGuestPageFault,
       storeAccessFault,
       loadAccessFault,
-      hardwareError
+      hardwareError,
+      dasicsU,
+      dasicsS
     )
 
     def getHigherExcpThan(excp: Int): Seq[Int] = {

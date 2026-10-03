@@ -798,6 +798,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
     sink.bits.uop.fuOpType       := source.bits.fuOpType
     sink.bits.uop.imm            := source.bits.imm
     sink.bits.uop.robIdx         := source.bits.robIdx
+    sink.bits.uop.fdiNotTrusted.foreach(_ := source.bits.fdiNotTrusted.get)
     sink.bits.uop.pdest          := source.bits.pdest
     sink.bits.uop.rfWen          := source.bits.rfWen.getOrElse(false.B)
     sink.bits.uop.fpWen          := source.bits.fpWen.getOrElse(false.B)

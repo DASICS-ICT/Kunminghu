@@ -24,6 +24,7 @@ import utility._
 import utility.ChiselDB
 import xiangshan._
 import xiangshan.backend.GPAMemEntry
+import xiangshan.backend.fu.FDIPcTrustChecker
 import xiangshan.cache.mmu._
 import xiangshan.frontend.icache._
 
@@ -81,6 +82,7 @@ class NewIFUIO(implicit p: Parameters) extends XSBundle {
   val pmp             = new ICachePMPBundle
   val mmioCommitRead  = new mmioCommitRead
   val csr_fsIsOff     = Input(Bool())
+  val fdiConfig       = Option.when(HasFDI)(Input(new FDIFrontendConfig))
 }
 
 // record the situation in which fallThruAddr falls into
@@ -422,6 +424,25 @@ class NewIFU(implicit p: Parameters) extends XSModule
   val f2_pc_high_plus1   = RegEnable(f1_pc_high_plus1, f1_fire)
   val f2_pc              = CatPC(f2_pc_lower_result, f2_pc_high, f2_pc_high_plus1)
 
+  val f2_fdiNotTrusted = Option.when(HasFDI) {
+    val config = io.fdiConfig.get
+    VecInit(f2_pc.map { pc =>
+      val trust = Module(new FDIPcTrustChecker)
+      // Classify the full instruction start, including a final RVI's first halfword.
+      trust.io.pc := Mux(config.sv39, SignExt(pc(38, 0), XLEN),
+        Mux(config.sv48, SignExt(pc(47, 0), XLEN), ZeroExt(pc, XLEN)))
+      trust.io.sourcePrivilege := config.sourcePrivilege
+      trust.io.sourceVirtual := config.sourceVirtual
+      trust.io.uEnable := config.uEnable
+      trust.io.sEnable := config.sEnable
+      trust.io.uBoundLo := config.uBoundLo
+      trust.io.uBoundHi := config.uBoundHi
+      trust.io.sBoundLo := config.sBoundLo
+      trust.io.sBoundHi := config.sBoundHi
+      trust.io.notTrusted
+    })
+  }
+
   val f2_cut_ptr      = RegEnable(f1_cut_ptr, f1_fire)
   val f2_resend_vaddr = RegEnable(f1_ftq_req.startAddr + 2.U, f1_fire)
 
@@ -566,6 +587,8 @@ class NewIFU(implicit p: Parameters) extends XSModule
   val f3_backendException = RegEnable(f2_backendException, f2_fire)
 
   val f3_instr = RegEnable(f2_instr, f2_fire)
+  // The tag shares the PC/instruction capture edge and holds through stalls and MMIO resend.
+  val f3_fdiNotTrusted = Option.when(HasFDI)(RegEnable(f2_fdiNotTrusted.get, f2_fire))
 
   expanders.zipWithIndex.foreach { case (expander, i) =>
     expander.io.in      := f3_instr(i)
@@ -930,6 +953,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   io.toIbuffer.bits.pd        := f3_pd
   io.toIbuffer.bits.ftqPtr    := f3_ftq_req.ftqIdx
   io.toIbuffer.bits.pc        := f3_pc
+  io.toIbuffer.bits.fdiNotTrusted.foreach(_ := f3_fdiNotTrusted.get)
   // Find last using PriorityMux
   io.toIbuffer.bits.isLastInFtqEntry := Reverse(PriorityEncoderOH(Reverse(io.toIbuffer.bits.enqEnable))).asBools
   io.toIbuffer.bits.ftqOffset.zipWithIndex.map { case (a, i) =>

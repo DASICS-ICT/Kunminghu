@@ -235,6 +235,21 @@ object ExceptionType {
   }
 }
 
+// Live fetch context; NewIFU samples its classification with the F2 transaction.
+class FDIFrontendConfig(implicit p: Parameters) extends XSBundle {
+  val sourcePrivilege = UInt(2.W)
+  val sourceVirtual   = Bool()
+  val uEnable         = Bool()
+  val sEnable         = Bool()
+  val uBoundLo        = UInt(64.W)
+  val uBoundHi        = UInt(64.W)
+  val sBoundLo        = UInt(64.W)
+  val sBoundHi        = UInt(64.W)
+  // Restore the full start PC using the instruction translation context.
+  val sv39            = Bool()
+  val sv48            = Bool()
+}
+
 class FetchToIBuffer(implicit p: Parameters) extends XSBundle {
   val instrs           = Vec(PredictWidth, UInt(32.W))
   val valid            = UInt(PredictWidth.W)
@@ -250,6 +265,8 @@ class FetchToIBuffer(implicit p: Parameters) extends XSBundle {
   val isLastInFtqEntry = Vec(PredictWidth, Bool())
 
   val pc           = Vec(PredictWidth, UInt(VAddrBits.W))
+  // Each bit belongs to the same candidate start PC; valid/enqEnable select instructions.
+  val fdiNotTrusted = Option.when(HasFDI)(Vec(PredictWidth, Bool()))
   val debug_seqNum = Vec(PredictWidth, InstSeqNum())
   val ftqPtr       = new FtqPtr
   val topdown_info = new FrontendTopDownBundle

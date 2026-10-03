@@ -39,6 +39,8 @@ import utility.mbist.MbistPipeline
 import utility.sram.SramBroadcastBundle
 import utility.sram.SramHelper
 import xiangshan._
+import xiangshan.backend.fu.NewCSR.CSRDefines.{PrivMode, SatpMode}
+import xiangshan.backend.fu.NewCSR.{FDIBoundRegisterAddress, FDIMainCfgAddress, FDIMainCfgBundle}
 import xiangshan.backend.fu.NewCSR.PFEvent
 import xiangshan.backend.fu.PMP
 import xiangshan.backend.fu.PMPChecker
@@ -128,6 +130,26 @@ class FrontendInlinedImp(outer: FrontendInlined) extends LazyModuleImp(outer)
     // Reuse the existing two-cycle data path, but never replay a pre-reset write.
     mirror.io.distribute.w.valid := RegNext(RegNext(io.csrCtrl.distribute_csr.w.valid, false.B), false.B)
     mirror
+  }
+  ifu.io.fdiConfig.foreach { config =>
+    val mirror = fdiMirror.get
+    val mainCfg = Wire(new FDIMainCfgBundle)
+    mainCfg := mirror.word(FDIMainCfgAddress.sMainCfg)
+    config.sourcePrivilege := tlbCsr.priv.imode
+    // Instruction source V is independent of the MPRV/MPV data translation context.
+    config.sourceVirtual := csrCtrl.virtMode
+    config.uEnable := mainCfg.uEnable.asBool
+    config.sEnable := mainCfg.sEnable.asBool
+    config.uBoundLo := mirror.word(FDIBoundRegisterAddress.uMainBoundLo)
+    config.uBoundHi := mirror.word(FDIBoundRegisterAddress.uMainBoundHi)
+    config.sBoundLo := mirror.word(FDIBoundRegisterAddress.sMainBoundLo)
+    config.sBoundHi := mirror.word(FDIBoundRegisterAddress.sMainBoundHi)
+    val sourceIsMachine = tlbCsr.priv.imode === PrivMode.M.asUInt
+    // Match NewCSR's instruction address recovery, including virtual-source selection.
+    config.sv39 := (!sourceIsMachine && !csrCtrl.virtMode && tlbCsr.satp.mode === SatpMode.Sv39.asUInt) ||
+      (csrCtrl.virtMode && tlbCsr.vsatp.mode === SatpMode.Sv39.asUInt)
+    config.sv48 := (!sourceIsMachine && !csrCtrl.virtMode && tlbCsr.satp.mode === SatpMode.Sv48.asUInt) ||
+      (csrCtrl.virtMode && tlbCsr.vsatp.mode === SatpMode.Sv48.asUInt)
   }
   val sfence  = RegNext(RegNext(io.sfence))
 

@@ -19,6 +19,8 @@ import xiangshan.backend.fu.wrapper.{CSRInput, CSRToDecode}
 class FuncUnitCtrlInput(cfg: FuConfig)(implicit p: Parameters) extends XSBundle {
   val fuOpType    = FuOpType()
   val robIdx      = new RobPtr
+  // Source trust follows this input's validity and control pipeline.
+  val fdiNotTrusted = Option.when(HasFDI)(Bool())
   val pdest       = UInt(PhyRegIdxWidth.W)
   val rfWen       = OptionWrapper(cfg.needIntWen, Bool())
   val fpWen       = OptionWrapper(cfg.needFpWen,  Bool())

@@ -43,6 +43,8 @@ object Bundles {
   class StaticInst(implicit p: Parameters) extends XSBundle {
     val instr            = UInt(32.W)
     val pc               = UInt(VAddrBits.W)
+    // Source-instruction trust is valid only with the enclosing transaction.
+    val fdiNotTrusted    = Option.when(HasFDI)(Bool())
     val foldpc           = UInt(MemPredPCWidth.W)
     val exceptionVec     = ExceptionVec()
     val isFetchMalAddr   = Bool()
@@ -58,6 +60,7 @@ object Bundles {
     def connectCtrlFlow(source: CtrlFlow): Unit = {
       this.instr            := source.instr
       this.pc               := source.pc
+      this.fdiNotTrusted.foreach(_ := source.fdiNotTrusted.get)
       this.foldpc           := source.foldpc
       this.exceptionVec     := source.exceptionVec
       this.isFetchMalAddr   := source.backendException
@@ -78,6 +81,8 @@ object Bundles {
     // passed from StaticInst
     val instr           = UInt(32.W)
     val pc              = UInt(VAddrBits.W)
+    // Every split uop retains its parent instruction's sampled trust result.
+    val fdiNotTrusted   = Option.when(HasFDI)(Bool())
     val foldpc          = UInt(MemPredPCWidth.W)
     val exceptionVec    = ExceptionVec()
     val isFetchMalAddr  = Bool()
@@ -173,6 +178,8 @@ object Bundles {
     // passed from StaticInst
     val instr           = UInt(32.W)
     val pc              = UInt(VAddrBits.W)
+    // Trust remains per instruction when ROB compression rewrites FTQ metadata.
+    val fdiNotTrusted   = Option.when(HasFDI)(Bool())
     val foldpc          = UInt(MemPredPCWidth.W)
     val exceptionVec    = ExceptionVec()
     val fdiException    = Option.when(HasFDI)(new FDIExceptionRecord)
@@ -609,6 +616,8 @@ object Bundles {
     val imm           = UInt(64.W)
     val nextPcOffset  = OptionWrapper(params.hasBrhFu, UInt((log2Up(PredictWidth) + 1).W))
     val robIdx        = new RobPtr
+    // The selected issue transaction owns this tag through stalls and retries.
+    val fdiNotTrusted = Option.when(HasFDI)(Bool())
     val iqIdx         = UInt(log2Up(MemIQSizeMax).W)// Only used by store yet
     val isFirstIssue  = Bool()                      // Only used by store yet
     val pdestCopy  = OptionWrapper(copyWakeupOut, Vec(copyNum, UInt(params.wbPregIdxWidth.W)))
@@ -663,6 +672,7 @@ object Bundles {
       this.fuOpType      := source.common.fuOpType
       this.imm           := source.common.imm
       this.robIdx        := source.common.robIdx
+      this.fdiNotTrusted.foreach(_ := source.common.fdiNotTrusted.get)
       this.pdest         := source.common.pdest
       this.isFirstIssue  := source.common.isFirstIssue // Only used by mem debug log
       this.iqIdx         := source.common.iqIdx        // Only used by mem feedback

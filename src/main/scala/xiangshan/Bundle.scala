@@ -145,6 +145,8 @@ class CfiUpdateInfo(implicit p: Parameters) extends XSBundle with HasBPUParamete
 class CtrlFlow(implicit p: Parameters) extends XSBundle {
   val instr = UInt(32.W)
   val pc = UInt(VAddrBits.W)
+  // Source trust is captured for this instruction and follows its existing validity.
+  val fdiNotTrusted = Option.when(HasFDI)(Bool())
   val foldpc = UInt(MemPredPCWidth.W)
   val exceptionVec = ExceptionVec()
   val backendException = Bool()

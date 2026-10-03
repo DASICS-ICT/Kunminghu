@@ -705,6 +705,7 @@ class CtrlBlockImp(
   for (i <- 0 until DecodeWidth) {
     fusionDecoder.io.in(i).valid := decode.io.out(i).valid && !decodeHasException(i)
     fusionDecoder.io.in(i).bits := decode.io.out(i).bits.instr
+    fusionDecoder.io.fdiNotTrusted.foreach(_(i) := decode.io.out(i).bits.fdiNotTrusted.get)
     if (i > 0) {
       fusionDecoder.io.inReady(i - 1) := decode.io.out(i).ready
     }

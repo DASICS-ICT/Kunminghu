@@ -250,6 +250,7 @@ class ExeUnitImp(
       sink.bits.data.imm         := source.bits.imm
       sink.bits.ctrl.fuOpType    := source.bits.fuOpType
       sink.bits.ctrl.robIdx      := source.bits.robIdx
+      sink.bits.ctrl.fdiNotTrusted.foreach(_ := source.bits.fdiNotTrusted.get)
       sink.bits.ctrl.pdest       := source.bits.pdest
       sink.bits.ctrl.rfWen       .foreach(x => x := source.bits.rfWen.get)
       sink.bits.ctrl.fpWen       .foreach(x => x := source.bits.fpWen.get)
@@ -277,6 +278,7 @@ class ExeUnitImp(
       fu.io.in.bits.validPipe.get(i) := inPipe._2(i)
       sink.fuOpType := source.fuOpType
       sink.robIdx := source.robIdx
+      sink.fdiNotTrusted.foreach(_ := source.fdiNotTrusted.get)
       sink.pdest := source.pdest
       sink.rfWen.foreach(x => x := source.rfWen.get)
       sink.fpWen.foreach(x => x := source.fpWen.get)
@@ -468,6 +470,7 @@ class MemExeUnit(exuParams: ExeUnitParams)(implicit p: Parameters) extends XSMod
   io.in.ready             := fu.io.in.ready
 
   fu.io.in.bits.ctrl.robIdx    := io.in.bits.uop.robIdx
+  fu.io.in.bits.ctrl.fdiNotTrusted.foreach(_ := io.in.bits.uop.fdiNotTrusted.get)
   fu.io.in.bits.ctrl.pdest     := io.in.bits.uop.pdest
   fu.io.in.bits.ctrl.fuOpType  := io.in.bits.uop.fuOpType
   fu.io.in.bits.data.imm       := io.in.bits.uop.imm

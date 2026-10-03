@@ -51,6 +51,7 @@ class IBufferIO(implicit p: Parameters) extends XSBundle {
 class IBufEntry(implicit p: Parameters) extends XSBundle {
   val inst             = UInt(32.W)
   val pc               = UInt(VAddrBits.W)
+  val fdiNotTrusted    = Option.when(HasFDI)(Bool())
   val foldpc           = UInt(MemPredPCWidth.W)
   val pd               = new PreDecodeInfo
   val pred_taken       = Bool()
@@ -65,6 +66,7 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
   def fromFetch(fetch: FetchToIBuffer, i: Int): IBufEntry = {
     inst       := fetch.instrs(i)
     pc         := fetch.pc(i)
+    fdiNotTrusted.foreach(_ := fetch.fdiNotTrusted.get(i))
     foldpc     := fetch.foldpc(i)
     pd         := fetch.pd(i)
     pred_taken := fetch.ftqOffset(i).valid
@@ -86,6 +88,7 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
     val cf = Wire(new CtrlFlow)
     cf.instr                             := inst
     cf.pc                                := pc
+    cf.fdiNotTrusted.foreach(_ := fdiNotTrusted.get)
     cf.foldpc                            := foldpc
     cf.exceptionVec                      := 0.U.asTypeOf(ExceptionVec())
     cf.exceptionVec(instrPageFault)      := IBufferExceptionType.isPF(this.exceptionType)

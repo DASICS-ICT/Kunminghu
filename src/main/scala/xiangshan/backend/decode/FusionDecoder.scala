@@ -540,6 +540,8 @@ class FusionDecoder(implicit p: Parameters) extends XSModule {
     val disableFusion = Input(Bool())
     // T0: detect instruction fusions in these instructions
     val in = Vec(DecodeWidth, Flipped(ValidIO(UInt(32.W))))
+    // T0 tags are sampled with the same instruction pair as fusion eligibility.
+    val fdiNotTrusted = Option.when(HasFDI)(Input(Vec(DecodeWidth, Bool())))
     val inReady = Vec(DecodeWidth - 1, Input(Bool())) // dropRight(1)
     // T1: decode result
     val dec = Vec(DecodeWidth - 1, Input(new DecodedInst)) // dropRight(1)
@@ -591,7 +593,12 @@ class FusionDecoder(implicit p: Parameters) extends XSModule {
     // NOTE: The RD of some FENCE instructions are not 0, but they are also HINT instructions.
     //       However, as FENCE instructions can never be fused, we do not need to consider them.
     val notHint = RegEnable(VecInit(pair.map(_.bits(11, 7) =/= 0.U)).asUInt.andR, fire)
-    val enabled = RegEnable(!io.disableFusion, fire)
+    // Save one qualification for replacement, clear and operand-source rewrites.
+    val enabled = RegEnable(
+      if (HasFDI) !io.disableFusion && (io.fdiNotTrusted.get(i) === io.fdiNotTrusted.get(i + 1))
+      else !io.disableFusion,
+      fire
+    )
     val thisCleared = io.clear(i)
     out.valid := instrPairValid && !thisCleared && fusionVec.asUInt.orR && notHint && enabled
     XSError(instrPairValid && PopCount(fusionVec) > 1.U, "more then one fusion matched\n")

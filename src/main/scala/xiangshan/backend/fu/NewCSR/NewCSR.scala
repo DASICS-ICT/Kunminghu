@@ -361,9 +361,10 @@ class NewCSR(implicit val p: Parameters) extends Module
   } else false.B
   // Bank requests have their own accepted write selection. Do not dispatch their delayed
   // write pulse using a subsequent live address through any legacy CSR consumer.
-  private val fdiMainCfg = Option.when(HasFDI)(new FDIMainCfgBank)
-  private val fdiBounds = Option.when(HasFDI)(new FDIBoundRegisterBank)
-  private val fdiSpecial = Option.when(HasFDI)(new FDISpecialRegisterBank)
+  // FDI owners sample reset synchronously even when the parent reset is asynchronous.
+  private val fdiMainCfg = Option.when(HasFDI)(withReset(reset.asBool)(new FDIMainCfgBank))
+  private val fdiBounds = Option.when(HasFDI)(withReset(reset.asBool)(new FDIBoundRegisterBank))
+  private val fdiSpecial = Option.when(HasFDI)(withReset(reset.asBool)(new FDISpecialRegisterBank))
   private val fdiRwEntries = fdiMainCfg.toSeq.flatMap(_.csrRwMap.toSeq) ++
     fdiBounds.toSeq.flatMap(_.csrRwMap.toSeq) ++ fdiSpecial.toSeq.flatMap(_.csrRwMap.toSeq)
   private val fdiOutEntries = fdiMainCfg.toSeq.flatMap(_.csrOutMap.toSeq) ++

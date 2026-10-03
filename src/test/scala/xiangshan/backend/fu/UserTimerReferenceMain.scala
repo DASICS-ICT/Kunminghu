@@ -12,9 +12,23 @@ import xiangshan.{CommitType, DebugOptionsKey, XSTileKey}
 import xiangshan.backend.fu.NewCSR.UserTimerCSRAddress
 import xiangshan.backend.fu.wrapper.CSR
 
+/** Match DiffArchEvent's source-mode address interpretation before the trap edge. */
+object UserTimerReferenceTrapAddress {
+  def apply(pc: UInt, privilege: UInt, virtualMode: Bool,
+    satpMode: UInt, vsatpMode: UInt, physicalBits: Int): UInt = {
+    val supervisorOrUser = privilege === 1.U || privilege === 0.U
+    val mode = Mux(virtualMode, vsatpMode, satpMode)
+    val sv39 = supervisorOrUser && mode === 8.U
+    val sv48 = supervisorOrUser && mode === 9.U
+    Mux(sv39, SignExt(pc(38, 0), 64),
+      Mux(sv48, SignExt(pc(47, 0), 64), ZeroExt(pc(physicalBits - 1, 0), 64)))
+  }
+}
+
 /** Both feature settings observe the same production execution and retirement interfaces. */
 object UserTimerReferenceObservations {
- def attach(sim: top.SimTop): Unit = {
+ def attach(sim: top.SimTop,
+   additional: (CSR, UserTimerReferenceObserver, UInt) => Unit = (_, _, _) => ()): Unit = {
   val core = sim.l_soc.core_with_l2.head.core
   val rob = core.backend.inner.ctrlBlock.rob.module
   val csrExu = core.backend.inner.intExuBlock.get.exus.find(_.exuParams.hasCSR).get.module
@@ -119,7 +133,13 @@ object UserTimerReferenceObservations {
     val huRequestPC = csr.huEntry.map(port => observe(port.request.bits.pc)).getOrElse(0.U(64.W))
     val huRequestFire = csr.huEntry.map(port => observe(port.request.valid) && observe(port.request.ready)).getOrElse(false.B)
     val huPC = RegEnable(huRequestPC, huRequestFire)
-    in.trapPC := Mux(huEffect, huPC, observe(bank.trapPC))
+    val trapPrivilege = observe(bank.io.status.privState)
+    val ordinaryTrapPC = UserTimerReferenceTrapAddress(observe(bank.trapPC),
+      trapPrivilege.PRVM.asUInt, trapPrivilege.V.asUInt.asBool,
+      observe(bank.satp.regOut.MODE).asUInt, observe(bank.vsatp.regOut.MODE).asUInt, bank.PAddrBits)
+    // Both this observer and DiffArchEvent sample the source mode on architecturalTrap.
+    // The destination privilege state is visible only after that edge.
+    in.trapPC := Mux(huEffect, huPC, ordinaryTrapPC)
     in.trapTarget := csrOutput.targetPc.pc
 
     def userCSR(address: Int): UInt = bank.userTimerCSROutMap.get(address).map(observe(_)).getOrElse(0.U(64.W))
@@ -174,6 +194,7 @@ object UserTimerReferenceObservations {
     in.hcsrState.vsscratch := observe(bank.vsscratch.rdata).asUInt
 
     val hartId = observe(rob.io.hartId)
+    additional(csr, observer, hartId)
     def connectPayload(target: Bundle, source: Bundle): Unit = {
       source.elements.foreach { case (name, data) => target.elements(name) := data }
     }

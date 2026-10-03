@@ -231,7 +231,7 @@ object FuConfig {
     ),
     piped = true,
     writeIntRf = true,
-    immType = Set(SelImm.IMM_I, SelImm.IMM_UJ, SelImm.IMM_U),
+    immType = Set(SelImm.IMM_I, SelImm.IMM_UJ, SelImm.IMM_U, SelImm.IMM_FDIJ),
     exceptionOut = Seq(dasicsU, dasicsS),
   )
 

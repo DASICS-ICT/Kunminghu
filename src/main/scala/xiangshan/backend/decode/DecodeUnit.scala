@@ -610,6 +610,14 @@ case class Imm_J() extends Imm(20){
   }
 }
 
+case class Imm_FDIJ() extends Imm(22) {
+  override def do_toImm32(minBits: UInt): UInt = SignExt(Cat(minBits, 0.U(1.W)), 32)
+
+  override def minBitsFromInstr(instr: UInt): UInt = {
+    Cat(instr(31), instr(7), instr(20, 15), instr(11, 8), instr(30, 21))
+  }
+}
+
 case class Imm_Z() extends Imm(12 + 5 + 5){
   override def do_toImm32(minBits: UInt): UInt = minBits
 
@@ -727,6 +735,7 @@ object ImmUnion {
   val B = Imm_B()
   val U = Imm_U()
   val J = Imm_J()
+  val FDIJ = Imm_FDIJ()
   val Z = Imm_Z()
   val B6 = Imm_B6()
   val OPIVIS = Imm_OPIVIS()
@@ -736,8 +745,8 @@ object ImmUnion {
   val LUI32 = Imm_LUI32()
   val VRORVI = Imm_VRORVI()
 
-  // do not add special type lui32 to this, keep ImmUnion max len being 20.
-  val imms = Seq(I, S, B, U, J, Z, B6, OPIVIS, OPIVIU, VSETVLI, VSETIVLI, VRORVI)
+  // LUI32 belongs to the fused path; normal decode retains compact fields.
+  val imms = Seq(I, S, B, U, J, Z, B6, OPIVIS, OPIVIU, VSETVLI, VSETIVLI, VRORVI, FDIJ)
   val maxLen = imms.maxBy(_.len).len
   val immSelMap = Seq(
     SelImm.IMM_I,
@@ -752,6 +761,7 @@ object ImmUnion {
     SelImm.IMM_VSETVLI,
     SelImm.IMM_VSETIVLI,
     SelImm.IMM_VRORVI,
+    SelImm.IMM_FDIJ,
   ).zip(imms)
   println(s"ImmUnion max len: $maxLen")
 }
@@ -826,7 +836,25 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
       XSDecode(SrcType.reg, SrcType.imm, SrcType.X, FuType.csr, CSROpType.jmp,
         SelImm.IMM_I, xWen = true, noSpec = true, blockBack = true).generate())
   } else Array.empty
-  val decode_table: Array[(BitPat, List[BitPat])] = baseDecodeTable ++ userReturnDecode
+  private val fdiCallDecode: Array[(BitPat, List[BitPat])] = if (HasFDI) {
+    val calls = Array(
+      FDIInstructions.FDICALL_J -> XSDecode(SrcType.pc, SrcType.imm, SrcType.X,
+        FuType.jmp, JumpOpType.fdicallJ, SelImm.IMM_FDIJ,
+        xWen = true, noSpec = true, blockBack = true).generate(),
+      FDIInstructions.FDICALL_JR -> XSDecode(SrcType.reg, SrcType.imm, SrcType.X,
+        FuType.jmp, JumpOpType.fdicallJR, SelImm.IMM_I,
+        xWen = true, noSpec = true, blockBack = true).generate()
+    )
+    calls.foreach { case (call, _) =>
+      require(!(baseDecodeTable ++ userReturnDecode).exists { case (pattern, _) =>
+        ((call.value ^ pattern.value) & call.mask & pattern.mask) == 0
+      }, "FDICALL encoding overlaps an existing instruction")
+    }
+    calls
+  } else Array.empty
+  val decode_table: Array[(BitPat, List[BitPat])] = baseDecodeTable ++ userReturnDecode ++ fdiCallDecode
+  private val isFdiCallJ = HasFDI.B && (FDIInstructions.FDICALL_J === ctrl_flow.instr)
+  private val isFdiCallJR = HasFDI.B && (FDIInstructions.FDICALL_JR === ctrl_flow.instr)
 
   require(decode_table.map(_._2.length == 15).reduce(_ && _), "Decode tables have different column size")
   // assertion for LUI: only LUI should be assigned `selImm === SelImm.IMM_U && fuType === FuType.alu`
@@ -874,7 +902,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
   decodedInst.lsrc(4) := Vl_IDX.U
 
   // read dest location
-  decodedInst.ldest := inst.RD
+  decodedInst.ldest := Mux(isFdiCallJ, 1.U, inst.RD)
 
   // init v0Wen vlWen
   decodedInst.v0Wen := false.B
@@ -894,6 +922,8 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
 
   private val exceptionII =
     decodedInst.selImm === SelImm.INVALID_INSTR ||
+    // Recognizing a call does not authorize its architectural side effects.
+    isFdiCallJ || isFdiCallJR ||
     io.fromCSR.illegalInst.sfenceVMA  && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.sfence  ||
     io.fromCSR.illegalInst.sfencePart && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.nofence ||
     io.fromCSR.illegalInst.hfenceGVMA && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.hfence_g ||

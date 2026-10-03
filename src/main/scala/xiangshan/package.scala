@@ -263,6 +263,9 @@ package object xiangshan {
     def jal  = "b00".U
     def jalr = "b01".U
     def auipc = "b10".U
+    // The low bits retain register-target and AUIPC selection semantics.
+    def fdicallJ = "b100".U
+    def fdicallJR = "b101".U
 //    def call = "b11_011".U
 //    def ret  = "b11_100".U
     def jumpOpisJalr(op: UInt) = op(0)
@@ -703,26 +706,28 @@ package object xiangshan {
   }
 
   object SelImm {
-    def IMM_X  = "b0111".U
-    def IMM_S  = "b1110".U
-    def IMM_SB = "b0001".U
-    def IMM_U  = "b0010".U
-    def IMM_UJ = "b0011".U
-    def IMM_I  = "b0100".U
-    def IMM_Z  = "b0101".U
-    def INVALID_INSTR = "b0110".U
-    def IMM_B6 = "b1000".U
+    def IMM_X  = "b00111".U
+    def IMM_S  = "b01110".U
+    def IMM_SB = "b00001".U
+    def IMM_U  = "b00010".U
+    def IMM_UJ = "b00011".U
+    def IMM_I  = "b00100".U
+    def IMM_Z  = "b00101".U
+    def INVALID_INSTR = "b00110".U
+    def IMM_B6 = "b01000".U
 
-    def IMM_OPIVIS = "b1001".U
-    def IMM_OPIVIU = "b1010".U
-    def IMM_VSETVLI   = "b1100".U
-    def IMM_VSETIVLI  = "b1101".U
-    def IMM_LUI32 = "b1011".U
-    def IMM_VRORVI = "b1111".U
+    def IMM_OPIVIS = "b01001".U
+    def IMM_OPIVIU = "b01010".U
+    def IMM_VSETVLI   = "b01100".U
+    def IMM_VSETIVLI  = "b01101".U
+    def IMM_LUI32 = "b01011".U
+    def IMM_VRORVI = "b01111".U
 
-    def X      = BitPat("b0000")
+    def IMM_FDIJ = "b10000".U
 
-    def apply() = UInt(4.W)
+    def X      = BitPat("b00000")
+
+    def apply() = UInt(5.W)
 
     def mkString(immType: UInt) : String = {
       val strMap = Map(
@@ -730,6 +735,7 @@ package object xiangshan {
         IMM_SB.litValue        -> "SB",
         IMM_U.litValue         -> "U",
         IMM_UJ.litValue        -> "UJ",
+        IMM_FDIJ.litValue      -> "FDIJ",
         IMM_I.litValue         -> "I",
         IMM_Z.litValue         -> "Z",
         IMM_B6.litValue        -> "B6",
@@ -750,6 +756,7 @@ package object xiangshan {
         IMM_SB.litValue        -> ImmUnion.B,
         IMM_U.litValue         -> ImmUnion.U,
         IMM_UJ.litValue        -> ImmUnion.J,
+        IMM_FDIJ.litValue      -> ImmUnion.FDIJ,
         IMM_I.litValue         -> ImmUnion.I,
         IMM_Z.litValue         -> ImmUnion.Z,
         IMM_B6.litValue        -> ImmUnion.B6,

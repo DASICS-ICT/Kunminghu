@@ -119,6 +119,16 @@ class FrontendInlinedImp(outer: FrontendInlined) extends LazyModuleImp(outer)
 
   val tlbCsr  = DelayN(io.tlbCsr, 2)
   val csrCtrl = DelayN(io.csrCtrl, 2)
+  val fdiMirror = Option.when(HasFDI) {
+    val mirror = withReset(reset.asBool) {
+      Module(new xiangshan.backend.fu.NewCSR.FDICSRMirror(
+        xiangshan.backend.fu.NewCSR.FDIMirrorClient.Frontend))
+    }
+    mirror.io.distribute := csrCtrl.distribute_csr
+    // Reuse the existing two-cycle data path, but never replay a pre-reset write.
+    mirror.io.distribute.w.valid := RegNext(RegNext(io.csrCtrl.distribute_csr.w.valid, false.B), false.B)
+    mirror
+  }
   val sfence  = RegNext(RegNext(io.sfence))
 
   // trigger

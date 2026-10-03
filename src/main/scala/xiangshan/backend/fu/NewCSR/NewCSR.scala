@@ -242,6 +242,7 @@ class NewCSR(implicit val p: Parameters) extends Module
     val fetchMalTval = Input(UInt(XLEN.W))
 
     val distributedWenLegal = Output(Bool())
+    val distributedFDI = Option.when(HasFDI)(Output(new DistributedCSRIO))
   })
 
   val toAIA   = IO(Output(new CSRToAIABundle))
@@ -361,7 +362,6 @@ class NewCSR(implicit val p: Parameters) extends Module
   } else false.B
   // Bank requests have their own accepted write selection. Do not dispatch their delayed
   // write pulse using a subsequent live address through any legacy CSR consumer.
-  // FDI owners sample reset synchronously even when the parent reset is asynchronous.
   private val fdiMainCfg = Option.when(HasFDI)(withReset(reset.asBool)(new FDIMainCfgBank))
   private val fdiBounds = Option.when(HasFDI)(withReset(reset.asBool)(new FDIBoundRegisterBank))
   private val fdiSpecial = Option.when(HasFDI)(withReset(reset.asBool)(new FDISpecialRegisterBank))
@@ -603,7 +603,8 @@ class NewCSR(implicit val p: Parameters) extends Module
       // The wrapper captures final RMW data on fire. Keep this address selection aligned
       // with that data for the following write edge, including bubbles and output stalls.
       val acceptedWrite = RegNext(io.in.fire && wenLegal && addr === id.U && !redirectFlush, false.B)
-      wBundle.wen := acceptedWrite && !redirectFlush
+      wBundle.wen := acceptedWrite && !redirectFlush &&
+        (if (fdiCSRMap.contains(id)) !reset.asBool else true.B)
       wBundle.wdata := wdata
     } else if (vsMapS.contains(id)) {
       // VS access CSR by S: privState.isModeVS && addrMappedToVS === sMapVS(id).U
@@ -616,6 +617,37 @@ class NewCSR(implicit val p: Parameters) extends Module
       wBundle.wen := wenLegalReg && addr === id.U
       wBundle.wdata := wdata
     }
+  }
+
+  if (HasFDI) {
+    // Normalize once at the accepted write effect. The same final word drives
+    // its native owner and the distribution bus; mirrors perform no CSR RMW.
+    val owners = fdiMainCfg.get.csrMods ++ fdiBounds.get.csrMods ++ fdiSpecial.get.csrMods
+    val ownerWords = owners.map { owner =>
+      val fields = Wire(chiselTypeOf(owner.regOut.asInstanceOf[CSRBundle]))
+      fields := wdata
+      owner.addr -> fields.asUInt
+    }.toMap
+    val uFields = Wire(new FDIUMainCfgBundle)
+    uFields := wdata
+    val uFinal = Wire(new FDIMainCfgBundle)
+    uFinal := fdiMainCfg.get.mainCfg.regOut
+    // No other MainCfg writer can intervene between the accepted request and
+    // this effect. Hidden fields come from the sole architectural owner.
+    for ((name, field) <- uFields.elements) {
+      uFinal.elements(name) := field
+    }
+    val finalWords = ownerWords + (FDIMainCfgAddress.uMainCfg -> uFinal.asUInt)
+    require(finalWords.keySet == fdiCSRMap.keySet)
+    val effects = fdiCSRMap.toSeq.map { case (address, (port, _)) => address -> port.wen }
+    val finalData = Mux1H(effects.map { case (address, effect) => effect -> finalWords(address) })
+    val distribution = io.distributedFDI.get.w
+    distribution.valid := effects.map(_._2).reduce(_ || _)
+    distribution.bits.addr := Mux1H(effects.map { case (address, effect) => effect -> address.U(12.W) })
+    distribution.bits.data := finalData
+    fdiCSRMap.values.foreach { case (port, _) => port.wdata := finalData }
+    assert(PopCount(VecInit(effects.map(_._2))) <= 1.U,
+      "Only one accepted FDI write may update and distribute each cycle")
   }
 
   private val writeFpLegal  = permitMod.io.out.hasLegalWriteFcsr

@@ -29,6 +29,14 @@ class ExuBlockImp(
   params: SchdBlockParams
 ) extends LazyModuleImp(wrapper) with HasCriticalErrors {
   val io = IO(new ExuBlockIO)
+  val fdiMirror = Option.when(wrapper.HasFDI && io.csrio.nonEmpty) {
+    val mirror = withReset(reset.asBool) {
+      Module(new xiangshan.backend.fu.NewCSR.FDICSRMirror(
+        xiangshan.backend.fu.NewCSR.FDIMirrorClient.ControlFlow))
+    }
+    mirror.io.distribute := io.csrio.get.customCtrl.distribute_csr
+    mirror
+  }
 
   private val exus = wrapper.exus.map(_.module)
 

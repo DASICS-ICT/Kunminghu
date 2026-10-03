@@ -397,6 +397,16 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   //val delayedDcacheRefill = RegNext(dcache.io.lsu.lsq)
 
   val csrCtrl = DelayN(io.ooo_to_mem.csrCtrl, 2)
+  val fdiMirror = Option.when(HasFDI) {
+    val mirror = withReset(reset.asBool) {
+      Module(new xiangshan.backend.fu.NewCSR.FDICSRMirror(
+        xiangshan.backend.fu.NewCSR.FDIMirrorClient.Memory))
+    }
+    mirror.io.distribute := csrCtrl.distribute_csr
+    // Data and reset-qualified valid have the same two-cycle transport latency.
+    mirror.io.distribute.w.valid := RegNext(RegNext(io.ooo_to_mem.csrCtrl.distribute_csr.w.valid, false.B), false.B)
+    mirror
+  }
   dcache.io.l2_pf_store_only := RegNext(io.ooo_to_mem.csrCtrl.pf_ctrl.l2_pf_store_only, false.B)
   io.error <> DelayNWithValid(dcache.io.error, 2)
   when(!csrCtrl.cache_error_enable){

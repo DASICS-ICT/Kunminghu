@@ -7,7 +7,7 @@ import utility._
 import xiangshan._
 import xiangshan.backend.fu.NewCSR._
 import xiangshan.backend.fu.util._
-import xiangshan.backend.fu.{FuConfig, FuncUnit}
+import xiangshan.backend.fu.{FDIPermissionOutcome, FuConfig, FuncUnit}
 import device._
 import system.HasSoCParameter
 import xiangshan.ExceptionNO._
@@ -137,6 +137,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       in.bits.addr := addr
       in.bits.src := src
       in.bits.wdata := wdataReg
+      in.bits.fdiNotTrusted.foreach(_ := io.in.bits.ctrl.fdiNotTrusted.get)
       // DataPath supplies the FTQ start address; offset and base travel with the
       // same issued instruction. Recover its RV64 PC using its fetch translation.
       val instructionPc = io.in.bits.data.pc.get + (io.in.bits.ctrl.ftqOffset.get << instOffsetBits)
@@ -220,7 +221,6 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   trapInstMod.io.fromRob.flush.valid := io.flush.valid
   trapInstMod.io.fromRob.flush.bits.ftqPtr := io.flush.bits.ftqIdx
   trapInstMod.io.fromRob.flush.bits.ftqOffset := io.flush.bits.ftqOffset
-  trapInstMod.io.faultCsrUop.valid         := csrMod.io.out.valid && (csrMod.io.out.bits.EX_II || csrMod.io.out.bits.EX_VI)
   trapInstMod.io.faultCsrUop.bits.fuOpType := DataHoldBypass(io.in.bits.ctrl.fuOpType, io.in.fire)
   trapInstMod.io.faultCsrUop.bits.imm      := DataHoldBypass(io.in.bits.data.imm, io.in.fire)
   trapInstMod.io.faultCsrUop.bits.ftqInfo.ftqPtr    := DataHoldBypass(io.in.bits.ctrl.ftqIdx.get, io.in.fire)
@@ -269,13 +269,43 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
 
   private val exceptionVec = WireInit(0.U.asTypeOf(ExceptionVec())) // Todo:
 
+  // Source flags and policy outcome describe the same accepted instruction,
+  // including while a different unaccepted request is held at the input.
+  private val ecallM = DataHoldBypass(isEcall && privState.isModeM, false.B, io.in.fire)
+  private val ecallHS = DataHoldBypass(isEcall && privState.isModeHS, false.B, io.in.fire)
+  private val ecallVS = DataHoldBypass(isEcall && privState.isModeVS, false.B, io.in.fire)
+  private val ecallU = DataHoldBypass(isEcall && privState.isModeHUorVU, false.B, io.in.fire)
+  private val ecallOutcome = csrMod.io.out.bits.fdiEcallOutcome.getOrElse(FDIPermissionOutcome.Allow)
+  private val ordinaryEcall = ecallOutcome === FDIPermissionOutcome.Allow
+  private val illegalEcall = if (HasFDI) {
+    val acceptedEcall = DataHoldBypass(isEcall, false.B, io.in.fire)
+    acceptedEcall && (ecallOutcome === FDIPermissionOutcome.IllegalGuest ||
+      ecallOutcome === FDIPermissionOutcome.InvalidInput)
+  } else false.B
+
   exceptionVec(EX_BP    ) := DataHoldBypass(isEbreak, false.B, io.in.fire)
-  exceptionVec(EX_MCALL ) := DataHoldBypass(isEcall && privState.isModeM, false.B, io.in.fire)
-  exceptionVec(EX_HSCALL) := DataHoldBypass(isEcall && privState.isModeHS, false.B, io.in.fire)
-  exceptionVec(EX_VSCALL) := DataHoldBypass(isEcall && privState.isModeVS, false.B, io.in.fire)
-  exceptionVec(EX_UCALL ) := DataHoldBypass(isEcall && privState.isModeHUorVU, false.B, io.in.fire)
-  exceptionVec(EX_II    ) := csrMod.io.out.bits.EX_II
+  exceptionVec(EX_MCALL ) := ecallM && ordinaryEcall
+  exceptionVec(EX_HSCALL) := ecallHS && ordinaryEcall
+  exceptionVec(EX_VSCALL) := ecallVS && ordinaryEcall
+  exceptionVec(EX_UCALL ) := ecallU && ordinaryEcall
+  exceptionVec(EX_II    ) := csrMod.io.out.bits.EX_II || illegalEcall
   exceptionVec(EX_VI    ) := csrMod.io.out.bits.EX_VI
+  if (HasFDI) {
+    val denied = ecallOutcome === FDIPermissionOutcome.DasicsDenied
+    exceptionVec(dasicsU) := ecallU && denied
+    exceptionVec(dasicsS) := ecallHS && denied
+    val fdiFault = exceptionVec(dasicsU) || exceptionVec(dasicsS)
+    io.out.bits.ctrl.fdiException.get.tval := 0.U
+    io.out.bits.ctrl.fdiException.get.reason := Mux(fdiFault, 1.U, 0.U)
+    assert(io.in.fire === csrMod.io.in.fire, "ECALL source and policy acceptance must match")
+    when(io.out.valid && (fdiFault || illegalEcall)) {
+      assert(!Seq(EX_MCALL, EX_HSCALL, EX_VSCALL, EX_UCALL).map(exceptionVec(_)).reduce(_ || _),
+        "A rejected ECALL cannot retain an ordinary ECALL cause")
+    }
+  }
+  // Executed ECALLs are legal at decode, so execution-time II must capture its
+  // own saved instruction/FTQ record through the same path as ordinary CSR II/VI.
+  trapInstMod.io.faultCsrUop.valid := csrModOutValid && (exceptionVec(EX_II) || exceptionVec(EX_VI))
 
   val isXRet = valid && func === CSROpType.jmp && !isEcall && !isEbreak
 

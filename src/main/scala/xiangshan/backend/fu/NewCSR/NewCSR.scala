@@ -18,6 +18,7 @@ import xiangshan.backend.fu.wrapper.CSRToDecode
 import xiangshan.backend.rob.RobPtr
 import xiangshan._
 import xiangshan.backend.fu.PerfCounterIO
+import xiangshan.backend.fu.{FDICheckKind, FDIPermissionOutcome, FDIPermissionPolicy}
 import xiangshan.backend.fu.util.CSRConst
 import xiangshan.ExceptionNO._
 import xiangshan.backend.trace._
@@ -80,6 +81,8 @@ class NewCSRInput(implicit p: Parameters) extends Bundle {
   val wdata = UInt(64.W)
   // Full start PC of the accepted CSR instruction, not an exception or fetch PC.
   val sourcePc = UInt(64.W)
+  // Instruction-owned trust is consumed only with the enclosing request.
+  val fdiNotTrusted = Option.when(p(XSCoreParamsKey).HasFDI)(Bool())
   val mnret = Input(Bool())
   val mret = Input(Bool())
   val sret = Input(Bool())
@@ -91,6 +94,8 @@ class NewCSRInput(implicit p: Parameters) extends Bundle {
 class NewCSROutput(implicit p: Parameters) extends Bundle {
   val EX_II = Bool()
   val EX_VI = Bool()
+  // The wrapper consumes this accepted-request classification only for ECALL.
+  val fdiEcallOutcome = Option.when(p(XSCoreParamsKey).HasFDI)(UInt(2.W))
   val flushPipe = Bool()
   val rData = UInt(64.W)
   val targetPcUpdate = Bool()
@@ -679,6 +684,29 @@ class NewCSR(implicit val p: Parameters) extends Module
     trust.io.uBoundLo := fdiBounds.get.uMainBoundLo.regOut.asUInt
     trust.io.uBoundHi := fdiBounds.get.uMainBoundHi.regOut.asUInt
     permitMod.io.in.fdiNotTrusted := trust.io.notTrusted
+  }
+  if (HasFDI) {
+    val fdiEcallPolicy = Module(new FDIPermissionPolicy)
+    val mainCfg = fdiMainCfg.get.mainCfg.regOut
+    fdiEcallPolicy.io.rawAllow := false.B
+    fdiEcallPolicy.io.checkKind := FDICheckKind.Ecall
+    fdiEcallPolicy.io.sourcePrivilege := privState.PRVM.asUInt
+    fdiEcallPolicy.io.sourceVirtual := privState.isVirtual
+    fdiEcallPolicy.io.notTrusted := io.in.bits.fdiNotTrusted.get
+    fdiEcallPolicy.io.config.sEnable := mainCfg.sEnable.asBool
+    fdiEcallPolicy.io.config.uEnable := mainCfg.uEnable.asBool
+    fdiEcallPolicy.io.config.sCloseRead := mainCfg.sCloseRead.asBool
+    fdiEcallPolicy.io.config.uCloseRead := mainCfg.uCloseRead.asBool
+    fdiEcallPolicy.io.config.sCloseWrite := mainCfg.sCloseWrite.asBool
+    fdiEcallPolicy.io.config.uCloseWrite := mainCfg.uCloseWrite.asBool
+    fdiEcallPolicy.io.config.sCloseJump := mainCfg.sCloseJump.asBool
+    fdiEcallPolicy.io.config.uCloseJump := mainCfg.uCloseJump.asBool
+    fdiEcallPolicy.io.config.sCloseEcall := mainCfg.sCloseEcall.asBool
+    fdiEcallPolicy.io.config.uCloseEcall := mainCfg.uCloseEcall.asBool
+    // Hold the policy and source/configuration decision at the same acceptance
+    // as the wrapper's ECALL flags. Stalled responses cannot sample live inputs.
+    io.out.bits.fdiEcallOutcome.get := DataHoldBypass(
+      fdiEcallPolicy.io.outcome, FDIPermissionOutcome.Allow, io.in.fire)
   }
   permitMod.io.in.xRet.uret := io.in.bits.uret && valid
 

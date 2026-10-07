@@ -525,27 +525,32 @@ class InterruptFilter(hasFDI: Boolean = false) extends Module {
                          C1C5Enable && (iprioC1 === iprioC2C5 && !hvictl.DPR.asBool || iprioC1 > iprioC2C5)
   if (hasFDI) {
     val raw = Wire(Valid(new InterruptDescriptor))
-    val higherPending = intrVec.orR || enableDebugIntr || (vsIRModeCond && SelectCandidate5)
+    // Critical recovery keeps its CETRIG/non-Debug qualification, but bypasses
+    // the ordinary haltreq STEP mask. Its descriptor owns no other IRQ source.
+    val criticalSelected = io.in.criticalDebug.get && io.in.dcsr.CETRIG.asBool && !io.in.debugMode
+    val higherPending = criticalSelected || intrVec.orR || enableDebugIntr || (vsIRModeCond && SelectCandidate5)
     val huSelected = io.in.huCandidate.get && !higherPending && !io.in.huCandidateKill.get
     raw.valid := higherPending || huSelected
-    raw.bits.cause := Mux(huSelected, 4.U, intrVec)
-    raw.bits.debug := enableDebugIntr
-    raw.bits.criticalDebug := io.in.criticalDebug.get && enableDebugIntr
-    raw.bits.nmi := io.in.nmi && !huSelected
-    raw.bits.virtualInterruptIsHvictlInject := vsIRModeCond && SelectCandidate5 && !io.in.nmi && !huSelected
-    raw.bits.irToHS := irToHS && !io.in.nmi && !huSelected
-    raw.bits.irToVS := irToVS && !io.in.nmi && !huSelected
+    raw.bits.cause := Mux(criticalSelected, 0.U, Mux(huSelected, 4.U, intrVec))
+    raw.bits.debug := criticalSelected || enableDebugIntr
+    raw.bits.criticalDebug := criticalSelected
+    raw.bits.nmi := io.in.nmi && !huSelected && !criticalSelected
+    raw.bits.virtualInterruptIsHvictlInject := vsIRModeCond && SelectCandidate5 && !io.in.nmi && !huSelected && !criticalSelected
+    raw.bits.irToHS := irToHS && !io.in.nmi && !huSelected && !criticalSelected
+    raw.bits.irToVS := irToVS && !io.in.nmi && !huSelected && !criticalSelected
     raw.bits.irToHU := huSelected
     raw.bits.isInterrupt := true.B
-    raw.bits.hvictlIID := hvictl.IID.asUInt
+    raw.bits.hvictlIID := Mux(criticalSelected, 0.U, hvictl.IID.asUInt)
     io.out.higherPriority.get := higherPending
 
     // Every candidate stage owns a valid bit. Claims clear next state only, so ROB
     // acceptance cannot feed combinationally back into its own selected valid.
+    // Eligibility loss revokes only unaccepted critical candidates; a claimed
+    // event reaches CSR through its saved ROB exception descriptor.
     val stages = candidateStages.get
     def revoked(event: InterruptDescriptor): Bool = {
       (event.irToHU && io.in.huCandidateKill.get) ||
-        (event.criticalDebug && io.in.criticalDebugInFlight.get) ||
+        (event.criticalDebug && (!criticalSelected || io.in.criticalDebugInFlight.get)) ||
         (event.nmi && !event.debug && io.in.nmiInFlight.get.valid &&
           event.cause === io.in.nmiInFlight.get.bits)
     }

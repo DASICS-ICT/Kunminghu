@@ -271,8 +271,8 @@ class NewCSR(implicit val p: Parameters) extends Module
   private val huSaved = Option.when(HasFDI)(Reg(new UserTrapEventInput))
   private val huIdentity = Option.when(HasFDI)(Reg(new InterruptEventIdentity))
   private val huTrapTarget = Option.when(HasFDI)(Reg(new TargetPCBundle))
-  // A critical error observed after a terminal effect needs a new precise ROB
-  // boundary; it must not reuse the completed HU transaction's recovery PC.
+  // Unowned critical requests wait for a precise ROB boundary. A held HU
+  // terminal keeps its own target and cannot supply that new recovery PC.
   private val deferredCriticalDebug = Option.when(HasFDI)(RegInit(false.B))
   private val criticalDebugInFlight = Option.when(HasFDI)(RegInit(false.B))
   private val huEligible = WireDefault(false.B)
@@ -333,6 +333,19 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   val criticalErrorStateInCSR = Wire(Bool())
   val criticalErrorState = RegEnable(true.B, false.B, io.fromTop.criticalErrorState || criticalErrorStateInCSR)
+
+  private val criticalQualified = Option.when(HasFDI)(
+    criticalErrorState && dcsr.regOut.CETRIG.asBool && !debugMode)
+  // The local NMIE=0 source already owns a ROB trap and its target slot. Keep
+  // only the context needed by its next-cycle Debug effect, not a new request.
+  private val localCriticalCapture = Option.when(HasFDI)(WireDefault(false.B))
+  private val localCriticalOwnerValid = Option.when(HasFDI)(RegInit(false.B))
+  private val localCriticalPc = Option.when(HasFDI)(Reg(UInt(VaddrMaxWidth.W)))
+  private val localCriticalPrivState = Option.when(HasFDI)(Reg(new PrivState))
+  private val localCriticalSatpMode = Option.when(HasFDI)(Reg(chiselTypeOf(satp.regOut.MODE)))
+  private val localCriticalVsatpMode = Option.when(HasFDI)(Reg(chiselTypeOf(vsatp.regOut.MODE)))
+  private val localCriticalHgatpMode = Option.when(HasFDI)(Reg(chiselTypeOf(hgatp.regOut.MODE)))
+  private val localCriticalTake = Option.when(HasFDI)(WireDefault(false.B))
 
   private val privState = Wire(new PrivState)
   privState.PRVM := PRVM
@@ -483,7 +496,11 @@ class NewCSR(implicit val p: Parameters) extends Module
     intrMod.io.in.nmiInFlight.get.bits := nmiInFlightCause.get
     intrMod.io.in.nmiClaim.get.valid := nmiClaim
     intrMod.io.in.nmiClaim.get.bits := nmiClaimCause
-    intrMod.io.in.criticalDebug.get := deferredCriticalDebug.get
+    // A request has no PC until ROB claims it. An owned HU or local trap uses
+    // its existing recovery instead of creating another candidate.
+    intrMod.io.in.criticalDebug.get := (deferredCriticalDebug.get || criticalQualified.get) &&
+      criticalQualified.get && !criticalDebugInFlight.get && !huBusy.get &&
+      !localCriticalCapture.get && !localCriticalOwnerValid.get
     val criticalClaim = io.acceptedInterrupt.get.valid && io.acceptedInterrupt.get.bits.interrupt.criticalDebug
     intrMod.io.in.criticalDebugInFlight.get := criticalDebugInFlight.get
     intrMod.io.in.criticalDebugClaim.get := criticalClaim
@@ -525,8 +542,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   intrMod.io.in.nmi := selectableNmi.orR
   intrMod.io.in.nmiVec := selectableNmi
   intrMod.io.in.debugMode := debugMode
-  intrMod.io.in.debugIntr := debugIntr || (deferredCriticalDebug.getOrElse(false.B) &&
-    !criticalDebugInFlight.getOrElse(false.B) && criticalErrorState && dcsr.regOut.CETRIG.asBool)
+  intrMod.io.in.debugIntr := debugIntr
   intrMod.io.in.dcsr      := dcsr.regOut
   intrMod.io.in.platform.meip := platformIRP.MEIP
   intrMod.io.in.platform.seip := platformIRP.SEIP
@@ -1375,8 +1391,10 @@ class NewCSR(implicit val p: Parameters) extends Module
     val qualificationWriteC0 = io.in.fire && wenLegal && !redirectFlush &&
       qualificationAddresses.map(address => addr === address.U).reduce(_ || _)
     val qualificationWriteC1 = qualificationAddresses.map(address => csrRwMap(address)._1.wen).reduce(_ || _)
+    // Pending critical blocks only new HU admission. It is not a higherEvent
+    // until an owned takeover exists, so accepted returns and targets survive.
     huCandidateInvalidate := !huEligible || qualificationWriteC0 || qualificationWriteC1 ||
-      huBusy.get || higherEvent || intrMod.io.out.higherPriority.get || reset.asBool
+      huBusy.get || higherEvent || intrMod.io.out.higherPriority.get || criticalQualified.get || reset.asBool
     val sameRequest = port.request.bits.event.asUInt === huIdentity.get.asUInt
     huCancelNow := port.cancel.valid && huBusy.get && !huFinished.get && !huTrapFinished.get &&
       port.cancel.bits.event.asUInt === huIdentity.get.asUInt
@@ -1556,8 +1574,11 @@ class NewCSR(implicit val p: Parameters) extends Module
   debugMod.io.in.trapInfo.bits.singleStep  := singleStep
   val acceptedCriticalDebug = useAcceptedInterrupt &&
     deliveredInterrupt.map(_.criticalDebug).getOrElse(false.B)
-  debugMod.io.in.trapInfo.bits.criticalErrorState := criticalErrorState &&
-    (!deferredCriticalDebug.getOrElse(false.B) || acceptedCriticalDebug)
+  debugMod.io.in.trapInfo.bits.criticalErrorState := (if (HasFDI) {
+    criticalErrorState && (acceptedCriticalDebug || localCriticalTake.get || huTakeDebug)
+  } else {
+    criticalErrorState && (!deferredCriticalDebug.getOrElse(false.B) || acceptedCriticalDebug)
+  })
   debugMod.io.in.privState                 := privState
   debugMod.io.in.debugMode                 := debugMode
   debugMod.io.in.dcsr                      := dcsr.regOut
@@ -1571,19 +1592,44 @@ class NewCSR(implicit val p: Parameters) extends Module
   debugMod.io.in.triggerCanRaiseBpExp      := triggerCanRaiseBpExp
 
   if (HasFDI) {
-    when(huBusy.get && (huFinished.get || huTrapFinished.get) &&
-      criticalErrorState && dcsr.regOut.CETRIG.asBool && !debugMode) {
-      deferredCriticalDebug.get := true.B
-    }.elsewhen(entryDebugMode && acceptedCriticalDebug) {
-      deferredCriticalDebug.get := false.B
+    localCriticalCapture.get := criticalErrorStateInCSR && !debugMode
+    localCriticalOwnerValid.get := localCriticalCapture.get
+    when(localCriticalCapture.get) {
+      localCriticalPc.get := trapPC
+      localCriticalPrivState.get := privState
+      localCriticalSatpMode.get := satp.regOut.MODE
+      localCriticalVsatpMode.get := vsatp.regOut.MODE
+      localCriticalHgatpMode.get := hgatp.regOut.MODE
     }
+    val huEffectLocked = huBusy.get && (huFinished.get || huTrapFinished.get)
+    localCriticalTake.get := localCriticalOwnerValid.get && criticalQualified.get && !huEffectLocked
+    when(localCriticalOwnerValid.get) {
+      assert(!hasTrap, "Local critical context must retain its original trap target slot")
+      assert(!huEffectLocked, "A local critical trap cannot replace an owned HU terminal")
+    }
+
     huTakeDebug := huBusy.get && !huFinished.get && huPcValid.get && !huTrapFinished.get &&
       !huCanceled.get && !huCancelNow && !hasTrap &&
-      (huDebugPending.get || debugMod.io.out.criticalErrorStateEnterDebug) && !debugMode
-    // Critical debug takes ownership immediately, but its architectural entry waits
-    // for the reserved instruction's real PC. Other accepted traps keep their PC.
-    entryDebugMode := !debugMode && Mux(huBusy.get && !hasTrap, huTakeDebug, debugMod.io.out.hasDebugTrap)
-    when(huTakeDebug) {
+      (huDebugPending.get || criticalQualified.get) && !debugMode
+    // Only an accepted descriptor or an existing local/HU owner can turn the
+    // pending error into an architectural effect. Ordinary accepted traps keep
+    // their own causes and acknowledgement even when an error is pending.
+    entryDebugMode := !debugMode && (localCriticalTake.get ||
+      Mux(huBusy.get && !hasTrap, huTakeDebug, debugMod.io.out.hasDebugTrap))
+    when(entryDebugMode && (acceptedCriticalDebug || localCriticalTake.get || huTakeDebug)) {
+      deferredCriticalDebug.get := false.B
+    }.elsewhen(criticalQualified.get) {
+      deferredCriticalDebug.get := true.B
+    }
+
+    when(localCriticalTake.get) {
+      trapEntryDEvent.in.trapPc := localCriticalPc.get
+      trapEntryDEvent.in.privState := localCriticalPrivState.get
+      trapEntryDEvent.in.iMode := localCriticalPrivState.get
+      trapEntryDEvent.in.satp.MODE := localCriticalSatpMode.get
+      trapEntryDEvent.in.vsatp.MODE := localCriticalVsatpMode.get
+      trapEntryDEvent.in.hgatp.MODE := localCriticalHgatpMode.get
+    }.elsewhen(huTakeDebug) {
       trapEntryDEvent.in.trapPc := huSaved.get.pc
     }
   } else {

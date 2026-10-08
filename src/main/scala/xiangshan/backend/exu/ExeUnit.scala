@@ -45,8 +45,8 @@ class ExeUnitIO(params: ExeUnitParams)(implicit p: Parameters) extends XSBundle 
   val vlIsZero = Option.when(params.writeVConfig)(Output(Bool()))
   val vlIsVlmax = Option.when(params.writeVConfig)(Output(Bool()))
   val instrAddrTransType = Option.when(params.hasJmpFu || params.hasBrhFu)(Input(new AddrTransType))
-  val fdiSource = Option.when(HasFDI && params.hasJmpFu)(Input(new FDIControlFlowSource))
-  val fdiTargets = Option.when(HasFDI && params.hasJmpFu)(Input(new FDIControlFlowTargets))
+  val fdiSource = Option.when(HasFDI && (params.hasJmpFu || params.hasBrhFu))(Input(new FDIControlFlowSource))
+  val fdiTargets = Option.when(HasFDI && (params.hasJmpFu || params.hasBrhFu))(Input(new FDIControlFlowTargets))
   val fdiCallReturnPC = Option.when(HasFDI && params.hasJmpFu)(Output(Valid(UInt(XLEN.W))))
   val fdiCallReturnPCIn = Option.when(HasFDI && params.hasCSR)(Input(Valid(UInt(XLEN.W))))
 }

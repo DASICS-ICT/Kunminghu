@@ -244,7 +244,7 @@ object FuConfig {
     ),
     piped = true,
     immType = Set(SelImm.IMM_SB),
-    exceptionOut = Seq(dasicsU, dasicsS),
+    exceptionOut = Seq(illegalInstr, dasicsU, dasicsS),
   )
 
   val I2fCfg: FuConfig = FuConfig (

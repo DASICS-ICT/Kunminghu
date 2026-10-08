@@ -9,7 +9,7 @@ import org.chipsalliance.cde.config.Parameters
 import org.scalatest.flatspec.AnyFlatSpec
 import xiangshan._
 import xiangshan.backend.fu.FuConfig
-import xiangshan.backend.fu.wrapper.JumpUnit
+import xiangshan.backend.fu.wrapper.{BranchUnit, JumpUnit}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 
@@ -103,7 +103,7 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
         assertions += 1
       }
       val legacyByName = Map(
-        "jmp" -> Set(2), "brh" -> Set.empty[Int],
+        "jmp" -> Set(2), "brh" -> Set(2),
         "csr" -> Set(2, 22, 3, 8, 9, 10, 11),
         "ldu" -> Set(2, 4, 5, 13, 21, 3, 19), "sta" -> Set(2, 6, 7, 15, 23, 3),
         "hylda" -> Set(4, 5, 13, 21), "hysta" -> Set(6, 7, 15, 23),
@@ -513,6 +513,112 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
       }
       Files.write(root.resolve(s"jump-${if (enabled) "on" else "off"}-summary.json"),
         s"""{"has_fdi":$enabled,"production_jump":true,"ordinary_target_link_checked":true,"call_permission_cases":$callCases,"ordinary_permission_cases":$ordinaryCases,"auipc_policy_bypass_checked":true,"call_scope":"FU handshakes; owner and retirement are separate integration checks"}""".getBytes(StandardCharsets.UTF_8))
+    }
+  }
+
+  for (enabled <- Seq(false, true)) {
+    it should s"check actual scalar Branch target permission with HasFDI=$enabled" in {
+      val root = Paths.get(sys.props.getOrElse("e01.runRoot", throw new IllegalArgumentException("Set e01.runRoot")))
+      require(root.isAbsolute && Paths.get("").toRealPath() == root.toRealPath())
+      implicit val p: Parameters = parameters(enabled)
+      var branchCases = 0
+      test(new BranchUnit(FuConfig.BrhCfg)).withAnnotations(Seq(
+        VerilatorBackendAnnotation, TargetDirAnnotation(s"rtl-branch-${if (enabled) "on" else "off"}"))) { dut =>
+        def clear(data: Data): Unit = data match {
+          case record: Record => record.elements.values.foreach(clear)
+          case vector: Vec[_] => vector.foreach(clear)
+          case value: Bool => value.poke(false.B)
+          case value: UInt => value.poke(0.U)
+          case value: SInt => value.poke(0.S)
+          case other => throw new IllegalArgumentException(s"Unsupported test input ${other.getClass.getName}")
+        }
+        clear(dut.io.in.bits)
+        clear(dut.io.flush.bits)
+        dut.io.instrAddrTransType.foreach(clear)
+        dut.io.fdiSource.foreach(clear)
+        dut.io.fdiTargets.foreach(clear)
+        dut.io.in.valid.poke(false.B)
+        dut.io.out.ready.poke(true.B)
+        dut.io.flush.valid.poke(false.B)
+        require(dut.io.fdiSource.isDefined == enabled && dut.io.fdiTargets.isDefined == enabled)
+        require(dut.io.fdiCallReturnPC.isEmpty && dut.io.out.bits.ctrl.rfWen.isEmpty)
+        dut.reset.poke(true.B); dut.clock.step(2); dut.reset.poke(false.B)
+        val addressMask = (BigInt(1) << 64) - 1
+        val pcMask = (BigInt(1) << dut.io.in.bits.data.pc.get.getWidth) - 1
+        def branch(name: String, taken: Boolean, predicted: Boolean, enabledCause: Int,
+                   pc: BigInt = BigInt("80000000", 16), offset: Int = 8,
+                   bounds: Option[(BigInt, BigInt)] = None, special: BigInt = 0,
+                   privilege: Int = 0, virtual: Boolean = false,
+                   trusted: Boolean = false, closed: Boolean = false,
+                   compressed: Boolean = false): Unit = withClue(s"branch $name enabled=$enabled: ") {
+          dut.io.in.valid.poke(false.B)
+          clear(dut.io.in.bits)
+          dut.io.fdiSource.foreach { source =>
+            clear(source)
+            source.sourcePrivilege.poke(privilege.U)
+            source.sourceVirtual.poke(virtual.B)
+            source.policy.uEnable.poke(true.B)
+            source.policy.sEnable.poke(true.B)
+            source.policy.uCloseJump.poke(closed.B)
+            source.policy.sCloseJump.poke(closed.B)
+          }
+          dut.io.fdiTargets.foreach { config =>
+            clear(config)
+            config.returnPC.poke(special.U)
+            bounds.foreach { case (lo, hi) =>
+              config.entries(0).entryValid.poke(true.B)
+              config.entries(0).boundLo.poke(lo.U)
+              config.entries(0).boundHi.poke(hi.U)
+            }
+          }
+          // BEQ with independent equal/unequal operands determines actual taken.
+          dut.io.in.bits.ctrl.fuOpType.poke(0.U)
+          dut.io.in.bits.ctrl.fdiNotTrusted.foreach(_.poke((!trusted).B))
+          dut.io.in.bits.ctrl.robIdx.value.poke(14.U)
+          dut.io.in.bits.ctrl.preDecode.get.isRVC.poke(compressed.B)
+          dut.io.in.bits.ctrl.predictInfo.get.taken.poke(predicted.B)
+          dut.io.in.bits.data.src(0).poke(5.U)
+          dut.io.in.bits.data.src(1).poke((if (taken) 5 else 6).U)
+          dut.io.in.bits.data.pc.get.poke((pc & pcMask).U)
+          dut.io.in.bits.data.imm.poke((BigInt(offset) & addressMask).U)
+          dut.io.in.bits.data.nextPcOffset.get.poke((if (compressed) 1 else 2).U)
+          dut.io.in.valid.poke(true.B)
+          val cause = if (enabled) enabledCause else 0
+          val target = (pc + (if (taken) offset else if (compressed) 2 else 4)) & addressMask
+          dut.io.out.valid.expect(true.B)
+          dut.io.out.bits.ctrl.robIdx.value.expect(14.U)
+          dut.io.out.bits.ctrl.exceptionVec.get.zipWithIndex.foreach { case (bit, index) =>
+            bit.expect((cause != 0 && cause == index).B)
+          }
+          dut.io.out.bits.res.redirect.get.valid.expect((cause == 0 && predicted != taken).B)
+          dut.io.out.bits.res.redirect.get.bits.fullTarget.expect(target.U)
+          dut.io.out.bits.ctrl.fdiException.foreach { record =>
+            record.tval.expect((if (cause == 24 || cause == 25) target else BigInt(0)).U)
+            record.reason.expect((if (cause == 24 || cause == 25) 4 else 0).U)
+          }
+          dut.clock.step()
+          dut.io.in.valid.poke(false.B)
+          branchCases += 1
+        }
+        val target = BigInt("80000008", 16)
+        val highPc = BigInt("ffff800000001000", 16)
+        branch("range", true, true, 0, bounds = Some(target -> (target + 8)))
+        branch("predicted-denial", true, true, 24)
+        branch("mispredicted-denial", true, false, 24)
+        branch("supervisor-denial", true, true, 25, privilege = 1)
+        branch("guest-taken", true, false, 2, virtual = true, trusted = true, closed = true)
+        branch("guest-not-taken", false, true, 0, virtual = true)
+        branch("host-not-taken-rvc", false, true, 0, compressed = true)
+        branch("not-taken-unused-source", false, false, 0, privilege = 2)
+        branch("full-target", true, false, 0, pc = highPc,
+          bounds = Some((highPc + 8) -> (highPc + 16)))
+        branch("high-target-denial", true, true, 24, pc = highPc,
+          bounds = Some(((highPc + 8) & pcMask) -> (((highPc + 8) & pcMask) + 8)))
+        branch("negative-offset-special", true, false, 0, pc = highPc, offset = -8,
+          special = highPc - 8)
+      }
+      Files.write(root.resolve(s"branch-${if (enabled) "on" else "off"}-summary.json"),
+        s"""{"has_fdi":$enabled,"production_branch":true,"permission_cases":$branchCases,"scope":"FU target and fault output; precise retirement is separate"}""".getBytes(StandardCharsets.UTF_8))
     }
   }
 

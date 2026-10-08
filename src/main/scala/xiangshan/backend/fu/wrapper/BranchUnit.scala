@@ -5,9 +5,10 @@ import chisel3._
 import chisel3.util.log2Up
 import utility.SignExt
 import xiangshan.backend.decode.ImmUnion
-import xiangshan.backend.fu.{BranchModule, FuConfig, FuncUnit}
+import xiangshan.backend.FDIExceptionRecord
+import xiangshan.backend.fu.{BranchModule, FDICheckKind, FDIJumpTargetChecker, FDIPermissionOutcome, FDIPermissionPolicy, FuConfig, FuncUnit}
 import xiangshan.backend.datapath.DataConfig.VAddrData
-import xiangshan.{RedirectLevel, SelImm, XSModule}
+import xiangshan.{ExceptionNO, RedirectLevel, SelImm, XSModule}
 
 class AddrAddModule(implicit p: Parameters) extends XSModule {
   val io = IO(new Bundle {
@@ -30,6 +31,9 @@ class AddrAddModule(implicit p: Parameters) extends XSModule {
 class BranchUnit(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg) {
   val dataModule = Module(new BranchModule)
   val addModule = Module(new AddrAddModule)
+  private val live = if (HasFDI) {
+    io.in.valid && !io.in.bits.ctrl.robIdx.needFlush(io.flush) && !reset.asBool
+  } else io.in.valid
   dataModule.io.src(0) := io.in.bits.data.src(0) // rs1
   dataModule.io.src(1) := io.in.bits.data.src(1) // rs2
   dataModule.io.func := io.in.bits.ctrl.fuOpType
@@ -41,13 +45,42 @@ class BranchUnit(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg) {
   addModule.io.isRVC := io.in.bits.ctrl.preDecode.get.isRVC
   addModule.io.nextPcOffset := io.in.bits.data.nextPcOffset.get
 
-  io.out.valid := io.in.valid
+  private val targetOutcome = if (HasFDI) {
+    val targets = io.fdiTargets.get
+    val source = io.fdiSource.get
+    val targetCheck = Module(new FDIJumpTargetChecker)
+    targetCheck.io.target := addModule.io.target
+    targetCheck.io.entries := targets.entries
+    targetCheck.io.mainCallEntry := targets.mainCallEntry
+    targetCheck.io.returnPC := targets.returnPC
+    targetCheck.io.activeZoneReturnPC := targets.activeZoneReturnPC
+    val policy = Module(new FDIPermissionPolicy)
+    policy.io.rawAllow := targetCheck.io.allow
+    policy.io.sourcePrivilege := source.sourcePrivilege
+    policy.io.sourceVirtual := source.sourceVirtual
+    policy.io.notTrusted := io.in.bits.ctrl.fdiNotTrusted.get
+    policy.io.checkKind := FDICheckKind.Jump
+    policy.io.config := source.policy
+    when(live && dataModule.io.taken) {
+      assert(policy.io.outcome =/= FDIPermissionOutcome.InvalidInput,
+        "An executing taken branch must have a valid source privilege")
+    }
+    // A not-taken branch performs no target permission operation, including
+    // the guest check that normally precedes trust and bounds in P04.
+    Mux(dataModule.io.taken, policy.io.outcome, FDIPermissionOutcome.Allow)
+  } else FDIPermissionOutcome.Allow
+  private val deniedTarget = targetOutcome === FDIPermissionOutcome.DasicsDenied
+  private val illegalTarget = targetOutcome === FDIPermissionOutcome.IllegalGuest ||
+    targetOutcome === FDIPermissionOutcome.InvalidInput
+  private val rejected = targetOutcome =/= FDIPermissionOutcome.Allow
+
+  io.out.valid := live
   io.in.ready := io.out.ready
 
   io.out.bits.res.data := 0.U
   io.out.bits.res.redirect.get match {
     case redirect =>
-      redirect.valid := io.out.valid && dataModule.io.mispredict
+      redirect.valid := io.out.valid && dataModule.io.mispredict && !rejected
       redirect.bits := 0.U.asTypeOf(io.out.bits.res.redirect.get.bits)
       redirect.bits.level := RedirectLevel.flushAfter
       redirect.bits.robIdx := io.in.bits.ctrl.robIdx
@@ -64,4 +97,11 @@ class BranchUnit(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg) {
       redirect.bits.cfiUpdate.backendIGPF := io.instrAddrTransType.get.checkGuestPageFault(addModule.io.target)
   }
   connect0LatencyCtrlSingal
+  if (HasFDI) {
+    io.out.bits.ctrl.exceptionVec.get := FDIExceptionRecord.exceptionVector(
+      deniedTarget, io.fdiSource.get.sourcePrivilege, io.fdiSource.get.sourceVirtual)
+    io.out.bits.ctrl.exceptionVec.get(ExceptionNO.illegalInstr) := illegalTarget
+    io.out.bits.ctrl.fdiException.get.tval := Mux(deniedTarget, addModule.io.target, 0.U)
+    io.out.bits.ctrl.fdiException.get.reason := Mux(deniedTarget, 4.U, 0.U)
+  }
 }

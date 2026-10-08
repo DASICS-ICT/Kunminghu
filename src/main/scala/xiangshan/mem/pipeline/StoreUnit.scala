@@ -24,6 +24,8 @@ import utility._
 import xiangshan._
 import xiangshan.ExceptionNO._
 import xiangshan.backend.Bundles.{MemExuInput, MemExuOutput, connectSamePort}
+import xiangshan.backend.FDIExceptionRecord
+import xiangshan.backend.fu.{FDIAccessOperation, FDIPermissionChecker, FDIPermissionOutcome}
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.fu.FuConfig._
 import xiangshan.backend.fu.FuType._
@@ -40,6 +42,7 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   val io = IO(new Bundle() {
     val redirect        = Flipped(ValidIO(new Redirect))
     val csrCtrl         = Flipped(new CustomCSRCtrlIO)
+    val fdiConfig       = Option.when(HasFDI)(Input(new FDIMemoryConfig))
     val stin            = Flipped(Decoupled(new MemExuInput))
     val issue           = Valid(new MemExuInput)
     // misalignBuffer issue path
@@ -236,6 +239,13 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   s0_out              := DontCare
   s0_out.vaddr        := s0_vaddr
   s0_out.fullva       := s0_fullva
+  if (HasFDI) {
+    // Source privilege belongs to the accepted instruction, not its translation mode.
+    s0_out.fdiSourcePrivilege.get := Mux(s0_use_flow_ma,
+      io.misalign_stin.bits.fdiSourcePrivilege.get, io.fdiConfig.get.sourcePrivilege)
+    s0_out.fdiSourceVirtual.get := Mux(s0_use_flow_ma,
+      io.misalign_stin.bits.fdiSourceVirtual.get, io.fdiConfig.get.sourceVirtual)
+  }
   // Now data use its own io
   s0_out.data         := s0_stin.src(1)
   s0_out.uop          := s0_uop
@@ -395,6 +405,40 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   )
   s1_out.vecTriggerMask := Mux(s1_trigger_debug_mode || s1_trigger_breakpoint, storeTrigger.io.toLoadStore.triggerMask, 0.U)
 
+  val fdiPermission = Option.when(HasFDI) {
+    withReset(reset.asBool) { Module(new FDIPermissionChecker) }
+  }
+  // Check the original scalar access after PMM; split, vector and special flows have other owners.
+  val s1_fdiCheck = if (HasFDI) {
+    !s1_in.isvec && !s1_in.isHWPrefetch && !s1_frm_mabuf && !s1_isCbo &&
+      !LSUOpType.isHsv(s1_in.uop.fuOpType)
+  } else false.B
+  fdiPermission.foreach { checker =>
+    checker.io.config := io.fdiConfig.get.policy
+    checker.io.entries := io.fdiConfig.get.entries
+    checker.io.req.valid := s1_fire && s1_fdiCheck && s1_tlb_hit
+    // This echo is unused; precise architectural EPC is supplied by ROB/FTQ.
+    checker.io.req.bits.pc := 0.U
+    checker.io.req.bits.address := s1_out.fullva
+    val identity = Cat(s1_out.uop.robIdx.asUInt, s1_out.uop.sqIdx.asUInt, s1_out.uop.uopIdx)
+    require(identity.getWidth <= 64)
+    checker.io.req.bits.tag := identity
+    checker.io.req.bits.sizeLog2 := s1_out.uop.fuOpType(2, 0)
+    checker.io.req.bits.operation := FDIAccessOperation.Write
+    checker.io.req.bits.sourcePrivilege := s1_out.fdiSourcePrivilege.get
+    checker.io.req.bits.sourceVirtual := s1_out.fdiSourceVirtual.get
+    checker.io.req.bits.notTrusted := s1_out.uop.fdiNotTrusted.get
+    // An age-selective redirect can cancel S2 while an older S1 replacement survives.
+    checker.io.flush := false.B
+    checker.io.resp.ready := true.B
+    when (s1_fire && s1_fdiCheck) {
+      assert(s1_tlb_hit, "An advancing ordinary store must have its valid TLB response")
+    }
+    when (checker.io.req.valid) {
+      assert(checker.io.req.ready, "Store permission must accept with its S1 transaction")
+    }
+  }
+
   // scalar store and scalar load nuke check, and also other purposes
   //A 128-bit aligned unaligned memory access requires changing the unaligned flag bit in sq
   io.lsq.valid     := s1_valid && !s1_in.isHWPrefetch
@@ -439,17 +483,53 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   val s2_trigger_debug_mode = RegEnable(s1_trigger_debug_mode, false.B, s1_fire)
   val s2_tlb_hit = RegEnable(s1_tlb_hit, s1_fire)
 
+  val s2_fdiCheck = Option.when(HasFDI)(RegEnable(s1_fdiCheck, false.B, s1_fire))
+  val s2_fdiBlocked = if (HasFDI) {
+    s2_valid && s2_fdiCheck.get && (!fdiPermission.get.io.resp.valid ||
+      fdiPermission.get.io.resp.bits.outcome =/= FDIPermissionOutcome.Allow)
+  } else false.B
+  val s2_fdiDenied = if (HasFDI) {
+    s2_valid && s2_fdiCheck.get && fdiPermission.get.io.resp.valid &&
+      fdiPermission.get.io.resp.bits.outcome === FDIPermissionOutcome.DasicsDenied
+  } else false.B
+  val s2_fdiIllegal = if (HasFDI) {
+    s2_valid && s2_fdiCheck.get && fdiPermission.get.io.resp.valid &&
+      fdiPermission.get.io.resp.bits.outcome === FDIPermissionOutcome.IllegalGuest
+  } else false.B
+  fdiPermission.foreach { checker =>
+    when (s2_valid && s2_fdiCheck.get) {
+      assert(s2_can_go, "Store permission requires the existing fixed S2 progression")
+      assert(checker.io.resp.valid, "A checked store must own a permission response")
+      assert(checker.io.resp.bits.request.tag ===
+        Cat(s2_in.uop.robIdx.asUInt, s2_in.uop.sqIdx.asUInt, s2_in.uop.uopIdx),
+        "Store permission and pipeline identity must match")
+      assert(checker.io.resp.bits.request.address === s2_in.fullva &&
+        checker.io.resp.bits.request.sizeLog2 === s2_in.uop.fuOpType(2, 0) &&
+        checker.io.resp.bits.request.notTrusted === s2_in.uop.fdiNotTrusted.get &&
+        checker.io.resp.bits.request.sourcePrivilege === s2_in.fdiSourcePrivilege.get &&
+        checker.io.resp.bits.request.sourceVirtual === s2_in.fdiSourceVirtual.get,
+        "Store permission must retain its effective address, size and source context")
+      assert(checker.io.resp.bits.outcome =/= FDIPermissionOutcome.InvalidInput,
+        "Ordinary stores must supply a legal permission descriptor")
+    }
+    when (checker.io.resp.valid) {
+      assert(s2_valid && s2_fdiCheck.get, "Store permission response must have its S2 owner")
+    }
+  }
+
   s2_ready := !s2_valid || s2_kill || s3_ready
   when (s1_fire) { s2_valid := true.B }
   .elsewhen (s2_fire) { s2_valid := false.B }
   .elsewhen (s2_kill) { s2_valid := false.B }
 
   val s2_pmp = WireInit(io.pmp)
+  // Standard candidates are formed independently before adding lower-priority FDI faults.
+  val s2_standard_exceptionVec = WireInit(s2_in.uop.exceptionVec)
 
   val s2_exception = RegNext(s1_feedback.bits.hit) &&
-                    (s2_trigger_debug_mode || ExceptionNO.selectByFu(s2_out.uop.exceptionVec, StaCfg).asUInt.orR) && s2_vecActive
+                    (s2_trigger_debug_mode || ExceptionNO.selectByFu(s2_out.uop.exceptionVec, StaCfg).asUInt.orR || s2_fdiBlocked) && s2_vecActive
   val s2_un_misalign_exception =  RegNext(s1_feedback.bits.hit) &&
-                    (s2_trigger_debug_mode || ExceptionNO.selectByFuAndUnSelect(s2_out.uop.exceptionVec, StaCfg, Seq(storeAddrMisaligned)).asUInt.orR)
+                    (s2_trigger_debug_mode || ExceptionNO.selectByFuAndUnSelect(s2_standard_exceptionVec, StaCfg, Seq(storeAddrMisaligned)).asUInt.orR)
 
   val s2_mmio = (s2_in.mmio || (Pbmt.isPMA(s2_pbmt) && s2_pmp.mmio)) && RegNext(s1_feedback.bits.hit)
   val s2_memBackTypeMM = !s2_pmp.mmio
@@ -471,11 +551,25 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   s2_out.af     := s2_out.uop.exceptionVec(storeAccessFault)
   s2_out.mmio   := s2_mmio && !s2_exception
   s2_out.memBackTypeMM := s2_memBackTypeMM
-  s2_out.uop.exceptionVec(storeAccessFault) := (s2_in.uop.exceptionVec(storeAccessFault) ||
+  s2_standard_exceptionVec(storeAccessFault) := (s2_in.uop.exceptionVec(storeAccessFault) ||
                                                 s2_pmp.st ||
                                                 ((s2_in.isvec || s2_isCbo) && s2_actually_uncache && RegNext(s1_feedback.bits.hit))
                                                 ) && s2_vecActive
-  s2_out.uop.exceptionVec(storeAddrMisaligned) := s2_actually_uncache && s2_in.isMisalign && !s2_un_misalign_exception
+  s2_standard_exceptionVec(storeAddrMisaligned) := s2_actually_uncache && s2_in.isMisalign && !s2_un_misalign_exception
+  s2_out.uop.exceptionVec := s2_standard_exceptionVec
+  if (HasFDI) {
+    val denied = FDIExceptionRecord.exceptionVector(s2_fdiDenied,
+      s2_in.fdiSourcePrivilege.get, s2_in.fdiSourceVirtual.get)
+    s2_out.uop.exceptionVec(dasicsU) := s2_standard_exceptionVec(dasicsU) || denied(dasicsU)
+    s2_out.uop.exceptionVec(dasicsS) := s2_standard_exceptionVec(dasicsS) || denied(dasicsS)
+    s2_out.uop.exceptionVec(illegalInstr) := s2_standard_exceptionVec(illegalInstr) || s2_fdiIllegal
+    when (s2_fdiDenied) {
+      s2_out.uop.fdiException.get.tval := fdiPermission.get.io.resp.bits.request.address
+      s2_out.uop.fdiException.get.reason := fdiPermission.get.io.resp.bits.reason
+    }
+    FDIExceptionRecord.check(s2_valid && !s2_in.uop.robIdx.needFlush(io.redirect),
+      s2_out.uop.exceptionVec, s2_out.uop.fdiException.get)
+  }
   s2_out.uop.vpu.vstart     := s2_in.vecVaddrOffset >> s2_in.uop.vpu.veew
 
   // kill dcache write intent request when mmio or exception
@@ -518,7 +612,7 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   io.lsq_replenish.isvec := s2_out.isvec || s2_frm_mab_vec
 
   io.lsq_replenish.hasException := (ExceptionNO.selectByFu(s2_out.uop.exceptionVec, StaCfg).asUInt.orR ||
-    TriggerAction.isDmode(s2_out.uop.trigger) || s2_out.af) && s2_valid && !s2_kill
+    TriggerAction.isDmode(s2_out.uop.trigger) || s2_out.af || s2_fdiBlocked) && s2_valid && !s2_kill
 
 
   // RegNext prefetch train for better timing

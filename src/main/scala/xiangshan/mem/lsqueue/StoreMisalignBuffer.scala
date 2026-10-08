@@ -155,8 +155,10 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
   val canEnq = !req_valid && !reqRedirect && reqSelValid
   val robMatch = req_valid && io.rob.pendingst && (io.rob.pendingPtr === req.uop.robIdx)
+  val cross4KBPageEnq = WireInit(false.B)
 
-  val s2_canEnq = GatedRegNext(canEnq)
+  // Both empty-slot and replacement acceptance own the next-cycle port revoke.
+  val s2_canEnq = GatedRegNext(canEnq || cross4KBPageEnq)
   val s2_reqSelPort = GatedRegNext(reqSelPort)
   val misalign_can_split = Wire(Bool())
   misalign_can_split := Mux(s2_canEnq, (0 until enqPortNum).map {
@@ -168,7 +170,6 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
     req.portIndex := reqSelPort
     req_valid := true.B
   }
-  val cross4KBPageEnq = WireInit(false.B)
   when (cross4KBPageBoundary && !reqRedirect) {
     when(
       reqSelValid &&

@@ -269,6 +269,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   val vecMbCommit = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // vector store committed from merge buffer to rob
   val hasException = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // store has exception, should deq but not write sbuffer
   val waitStoreS2 = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // wait for mmio and exception result until store_s2
+  // A same-cycle allocation owns the slot over a delayed result from its former owner.
+  val fdiSlotReallocated = Option.when(HasFDI)(Wire(Vec(StoreQueueSize, Bool())))
   // val vec_robCommit = Reg(Vec(StoreQueueSize, Bool())) // vector store committed by rob
   // val vec_secondInv = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // Vector unit-stride, second entry is invalid
   val vecExceptionFlag = RegInit(0.U.asTypeOf(Valid(new DynInst)))
@@ -375,6 +377,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     }
 
     val entryCanEnq = entryCanEnqSeq.reduce(_ || _)
+    fdiSlotReallocated.foreach(_(i) := entryCanEnq)
     val selectBits = ParallelPriorityMux(entryCanEnqSeq, io.enq.req.map(_.bits))
     val selectUpBound = ParallelPriorityMux(entryCanEnqSeq, enqUpBound)
     when (entryCanEnq) {
@@ -484,19 +487,31 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     vaddrModule.io.wen(i) := false.B
     dataModule.io.mask.wen(i) := false.B
     val stWbIndex = io.storeAddrIn(i).bits.uop.sqIdx.value
-    exceptionBuffer.io.storeAddrIn(i).valid := io.storeAddrIn(i).fire && !io.storeAddrIn(i).bits.miss && !io.storeAddrIn(i).bits.isvec
+    val stWbScalar = if (HasFDI) {
+      !io.storeAddrIn(i).bits.isvec && !io.storeAddrIn(i).bits.isFrmMisAlignBuf &&
+        !LSUOpType.isCboAll(io.storeAddrIn(i).bits.uop.fuOpType) &&
+        !LSUOpType.isHsv(io.storeAddrIn(i).bits.uop.fuOpType)
+    } else false.B
+    val stWbOwnerLive = if (HasFDI) {
+      !stWbScalar || (allocated(stWbIndex) && !fdiSlotReallocated.get(stWbIndex) &&
+        uop(stWbIndex).robIdx === io.storeAddrIn(i).bits.uop.robIdx &&
+        uop(stWbIndex).sqIdx === io.storeAddrIn(i).bits.uop.sqIdx &&
+        !io.storeAddrIn(i).bits.uop.robIdx.needFlush(io.brqRedirect))
+    } else true.B
+    val storeAddrAccepted = io.storeAddrIn(i).fire && stWbOwnerLive
+    exceptionBuffer.io.storeAddrIn(i).valid := storeAddrAccepted && !io.storeAddrIn(i).bits.miss && !io.storeAddrIn(i).bits.isvec
     exceptionBuffer.io.storeAddrIn(i).bits := io.storeAddrIn(i).bits
     // will re-enter exceptionbuffer at store_s2
     exceptionBuffer.io.storeAddrIn(StorePipelineWidth + i).valid := false.B
     exceptionBuffer.io.storeAddrIn(StorePipelineWidth + i).bits := 0.U.asTypeOf(new LsPipelineBundle)
 
-    when (io.storeAddrIn(i).fire && io.storeAddrIn(i).bits.updateAddrValid) {
+    when (storeAddrAccepted && io.storeAddrIn(i).bits.updateAddrValid) {
       val addr_valid = !io.storeAddrIn(i).bits.miss
       addrvalid(stWbIndex) := addr_valid //!io.storeAddrIn(i).bits.mmio
       nc(stWbIndex) := io.storeAddrIn(i).bits.nc
 
     }
-    when (io.storeAddrIn(i).fire && !io.storeAddrIn(i).bits.isFrmMisAlignBuf) {
+    when (storeAddrAccepted && !io.storeAddrIn(i).bits.isFrmMisAlignBuf) {
       // pending(stWbIndex) := io.storeAddrIn(i).bits.mmio
       unaligned(stWbIndex) := io.storeAddrIn(i).bits.isMisalign
       cross16Byte(stWbIndex) := io.storeAddrIn(i).bits.isMisalign && !io.storeAddrIn(i).bits.misalignWith16Byte
@@ -517,7 +532,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
       // mmio(stWbIndex) := io.storeAddrIn(i).bits.mmio
     }
-    when (io.storeAddrIn(i).fire) {
+    when (storeAddrAccepted) {
       uop(stWbIndex) := io.storeAddrIn(i).bits.uop
       uop(stWbIndex).debugInfo := io.storeAddrIn(i).bits.uop.debugInfo
       uop(stWbIndex).debug_seqNum := io.storeAddrIn(i).bits.uop.debug_seqNum
@@ -534,15 +549,40 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     )
 
     // re-replinish mmio, for pma/pmp will get mmio one cycle later
-    val storeAddrInFireReg = RegNext(io.storeAddrIn(i).fire && !io.storeAddrIn(i).bits.miss) && io.storeAddrInRe(i).updateAddrValid
-    //val stWbIndexReg = RegNext(stWbIndex)
-    val stWbIndexReg = RegEnable(stWbIndex, io.storeAddrIn(i).fire)
+    val stWbIndexReg = RegEnable(stWbIndex, storeAddrAccepted)
+    val storeAddrSeenReg = RegNext(storeAddrAccepted && !io.storeAddrIn(i).bits.miss)
+    val stWbScalarReg = Option.when(HasFDI)(RegEnable(stWbScalar, false.B, storeAddrAccepted))
+    // The unqualified S2 port follows the preceding S1 acceptance, including pointer flags.
+    val replenishOwnerLive = if (HasFDI) {
+      val sq = RegEnable(io.storeAddrIn(i).bits.uop.sqIdx, storeAddrAccepted)
+      val rob = RegEnable(io.storeAddrIn(i).bits.uop.robIdx, storeAddrAccepted)
+      val uopIdx = RegEnable(io.storeAddrIn(i).bits.uop.uopIdx, storeAddrAccepted)
+      val live = allocated(stWbIndexReg) && !fdiSlotReallocated.get(stWbIndexReg) &&
+        uop(stWbIndexReg).robIdx === rob && uop(stWbIndexReg).sqIdx === sq &&
+        !rob.needFlush(io.brqRedirect)
+      val matches = io.storeAddrInRe(i).uop.robIdx === rob && io.storeAddrInRe(i).uop.sqIdx === sq &&
+        io.storeAddrInRe(i).uop.uopIdx === uopIdx
+      when (storeAddrSeenReg && stWbScalarReg.get && live) {
+        assert(matches, "Store S2 supplement must match its accepted S1 owner")
+      }
+      !stWbScalarReg.get || (live && matches)
+    } else true.B
+    val storeAddrInFireReg = storeAddrSeenReg && io.storeAddrInRe(i).updateAddrValid && replenishOwnerLive
+    val scalarException = if (HasFDI) stWbScalarReg.get && io.storeAddrInRe(i).hasException else false.B
     when (storeAddrInFireReg) {
-      pending(stWbIndexReg) := io.storeAddrInRe(i).mmio
-      mmio(stWbIndexReg) := io.storeAddrInRe(i).mmio
+      pending(stWbIndexReg) := io.storeAddrInRe(i).mmio && !scalarException
+      mmio(stWbIndexReg) := io.storeAddrInRe(i).mmio && !scalarException
       memBackTypeMM(stWbIndexReg) := io.storeAddrInRe(i).memBackTypeMM
       hasException(stWbIndexReg) := io.storeAddrInRe(i).hasException
       waitStoreS2(stWbIndexReg) := false.B
+      if (HasFDI) {
+        when (stWbScalarReg.get) {
+          // An exceptional NC store must drain as an empty token, never wait for an unsent write.
+          nc(stWbIndexReg) := io.storeAddrInRe(i).nc && !scalarException
+          uop(stWbIndexReg).exceptionVec := io.storeAddrInRe(i).uop.exceptionVec
+          uop(stWbIndexReg).fdiException.get := io.storeAddrInRe(i).uop.fdiException.get
+        }
+      }
     }
     // dcache miss info (one cycle later than storeIn)
     // if dcache report a miss in sta pipeline, this store will trigger a prefetch when committing to sbuffer (if EnableAtCommitMissTrigger)
@@ -875,7 +915,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   val rptr0 = rdataPtrExt(0).value
   switch(ncState){
     is(nc_idle) {
-      when(nc(rptr0) && allocated(rptr0) && committed(rptr0) && !mmio(rptr0) && !isVec(rptr0)) {
+      val finalStoreCanPublish = if (HasFDI) !waitStoreS2(rptr0) && !hasException(rptr0) else true.B
+      when(nc(rptr0) && allocated(rptr0) && committed(rptr0) && !mmio(rptr0) && !isVec(rptr0) && finalStoreCanPublish) {
         ncState := nc_req
         ncWaitRespPtrReg := rptr0
       }

@@ -1268,6 +1268,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
 
     stu.io.redirect      <> redirect
     stu.io.csrCtrl       <> csrCtrl
+    stu.io.fdiConfig.foreach(_ := fdiConfig.get)
     stu.io.dcache        <> dcache.io.lsu.sta(i)
     stu.io.feedback_slow <> io.mem_to_ooo.staIqFeedback(i).feedbackSlow
     stu.io.stin         <> io.ooo_to_mem.issueSta(i)

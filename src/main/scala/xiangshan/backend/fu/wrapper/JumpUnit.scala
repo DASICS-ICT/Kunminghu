@@ -4,7 +4,8 @@ import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import fudian.SignExt
 import xiangshan.{ExceptionNO, JumpOpType, RedirectLevel}
-import xiangshan.backend.fu.{FDISourcePrivilege, FuConfig, FuncUnit, JumpDataModule, PipedFuncUnit}
+import xiangshan.backend.FDIExceptionRecord
+import xiangshan.backend.fu.{FDICheckKind, FDIJumpTargetChecker, FDIPermissionOutcome, FDIPermissionPolicy, FDISourcePrivilege, FuConfig, FuncUnit, JumpDataModule, PipedFuncUnit}
 import xiangshan.backend.datapath.DataConfig.VAddrData
 
 
@@ -37,12 +38,41 @@ class JumpUnit(cfg: FuConfig)(implicit p: Parameters) extends PipedFuncUnit(cfg)
   jumpDataModule.io.func := func
   jumpDataModule.io.isRVC := isRVC
 
+  private val targetOutcome = if (HasFDI) {
+    val ordinaryJump = func === JumpOpType.jal || func === JumpOpType.jalr
+    val targets = io.fdiTargets.get
+    val source = io.fdiSource.get
+    val targetCheck = Module(new FDIJumpTargetChecker)
+    targetCheck.io.target := jumpDataModule.io.target
+    targetCheck.io.entries := targets.entries
+    targetCheck.io.mainCallEntry := targets.mainCallEntry
+    targetCheck.io.returnPC := targets.returnPC
+    targetCheck.io.activeZoneReturnPC := targets.activeZoneReturnPC
+    val policy = Module(new FDIPermissionPolicy)
+    policy.io.rawAllow := targetCheck.io.allow
+    policy.io.sourcePrivilege := source.sourcePrivilege
+    policy.io.sourceVirtual := source.sourceVirtual
+    policy.io.notTrusted := io.in.bits.ctrl.fdiNotTrusted.get
+    policy.io.checkKind := FDICheckKind.Jump
+    policy.io.config := source.policy
+    when(live && ordinaryJump) {
+      assert(policy.io.outcome =/= FDIPermissionOutcome.InvalidInput,
+        "An executing jump must have a valid source privilege")
+    }
+    // FDICALL has its own source-only permission and AUIPC is not a jump.
+    Mux(ordinaryJump, policy.io.outcome, FDIPermissionOutcome.Allow)
+  } else FDIPermissionOutcome.Allow
+  private val deniedTarget = targetOutcome === FDIPermissionOutcome.DasicsDenied
+  private val illegalTarget = targetOutcome === FDIPermissionOutcome.IllegalGuest ||
+    targetOutcome === FDIPermissionOutcome.InvalidInput
+  private val rejected = illegalCall || targetOutcome =/= FDIPermissionOutcome.Allow
+
   val jmpTarget = io.in.bits.ctrl.predictInfo.get.target
   val predTaken = io.in.bits.ctrl.predictInfo.get.taken
 
   val redirect = io.out.bits.res.redirect.get.bits
   val redirectValid = io.out.bits.res.redirect.get.valid
-  redirectValid := live && !jumpDataModule.io.isAuipc && !illegalCall
+  redirectValid := live && !jumpDataModule.io.isAuipc && !rejected
   redirect := 0.U.asTypeOf(redirect)
   redirect.level := RedirectLevel.flushAfter
   redirect.robIdx := io.in.bits.ctrl.robIdx
@@ -61,11 +91,15 @@ class JumpUnit(cfg: FuConfig)(implicit p: Parameters) extends PipedFuncUnit(cfg)
 
   io.in.ready := io.out.ready
   io.out.valid := live
-  io.out.bits.res.data := Mux(illegalCall, 0.U, jumpDataModule.io.result)
+  io.out.bits.res.data := Mux(rejected, 0.U, jumpDataModule.io.result)
   connect0LatencyCtrlSingal
   if (HasFDI) {
-    io.out.bits.ctrl.exceptionVec.get(ExceptionNO.illegalInstr) := illegalCall
-    io.out.bits.ctrl.rfWen.get := io.in.bits.ctrl.rfWen.get && !illegalCall
+    io.out.bits.ctrl.exceptionVec.get := FDIExceptionRecord.exceptionVector(
+      deniedTarget, io.fdiSource.get.sourcePrivilege, io.fdiSource.get.sourceVirtual)
+    io.out.bits.ctrl.exceptionVec.get(ExceptionNO.illegalInstr) := illegalCall || illegalTarget
+    io.out.bits.ctrl.fdiException.get.tval := Mux(deniedTarget, jumpDataModule.io.target, 0.U)
+    io.out.bits.ctrl.fdiException.get.reason := Mux(deniedTarget, 4.U, 0.U)
+    io.out.bits.ctrl.rfWen.get := io.in.bits.ctrl.rfWen.get && !rejected
     // rd=x0 removes only the link destination. The implicit ReturnPC effect
     // still belongs to this same successful, non-canceled output handshake.
     io.fdiCallReturnPC.get.valid := io.out.fire && isFdiCall && !illegalCall

@@ -270,6 +270,7 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
       require(root.isAbsolute && Paths.get("").toRealPath() == root.toRealPath())
       implicit val p: Parameters = parameters(enabled)
       var callCases = 0
+      var ordinaryCases = 0
       test(new JumpUnit(FuConfig.JmpCfg)).withAnnotations(Seq(
         VerilatorBackendAnnotation, TargetDirAnnotation(s"rtl-jump-${if (enabled) "on" else "off"}"))) { dut =>
         def clear(data: Data): Unit = data match {
@@ -284,7 +285,8 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
         clear(dut.io.flush.bits)
         dut.io.instrAddrTransType.foreach(clear)
         dut.io.fdiSource.foreach(clear)
-        require(dut.io.fdiSource.isDefined == enabled)
+        dut.io.fdiTargets.foreach(clear)
+        require(dut.io.fdiSource.isDefined == enabled && dut.io.fdiTargets.isDefined == enabled)
         require(dut.io.fdiCallReturnPC.isDefined == enabled)
         dut.io.in.valid.poke(false.B)
         dut.io.out.ready.poke(true.B)
@@ -397,9 +399,120 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
           dut.reset.poke(false.B)
           call.valid.expect(false.B)
         }
+
+        val addressMask = (BigInt(1) << 64) - 1
+        val predictionMask = (BigInt(1) << dut.io.in.bits.ctrl.predictInfo.get.target.getWidth) - 1
+        def ordinary(name: String, operation: Int, target: BigInt, enabledCause: Int,
+                     bounds: Option[(BigInt, BigInt)] = None, special: BigInt = 0,
+                     privilege: Int = 0, virtual: Boolean = false,
+                     policyEnabled: Boolean = true, trusted: Boolean = false,
+                     closed: Boolean = false): Unit = withClue(s"ordinary $name enabled=$enabled: ") {
+          dut.io.in.valid.poke(false.B)
+          clear(dut.io.in.bits)
+          clear(dut.io.flush.bits)
+          dut.io.flush.valid.poke(false.B)
+          dut.io.out.ready.poke(true.B)
+          dut.io.fdiSource.foreach { source =>
+            clear(source)
+            source.sourcePrivilege.poke(privilege.U)
+            source.sourceVirtual.poke(virtual.B)
+            source.policy.uEnable.poke(policyEnabled.B)
+            source.policy.sEnable.poke(policyEnabled.B)
+            source.policy.uCloseJump.poke(closed.B)
+            source.policy.sCloseJump.poke(closed.B)
+          }
+          dut.io.fdiTargets.foreach { config =>
+            clear(config)
+            config.returnPC.poke(special.U)
+            bounds.foreach { case (lo, hi) =>
+              config.entries(0).entryValid.poke(true.B)
+              config.entries(0).boundLo.poke(lo.U)
+              config.entries(0).boundHi.poke(hi.U)
+            }
+          }
+          dut.io.in.bits.ctrl.fdiNotTrusted.foreach(_.poke((!trusted).B))
+          dut.io.in.bits.ctrl.fuOpType.poke(operation.U)
+          dut.io.in.bits.ctrl.rfWen.get.poke(true.B)
+          dut.io.in.bits.ctrl.pdest.poke(3.U)
+          dut.io.in.bits.ctrl.robIdx.value.poke(12.U)
+          dut.io.in.bits.ctrl.predictInfo.get.taken.poke(true.B)
+          dut.io.in.bits.ctrl.predictInfo.get.target.poke((target & predictionMask).U)
+          dut.io.in.bits.data.pc.get.poke(BigInt("80000000", 16).U)
+          dut.io.in.bits.data.nextPcOffset.get.poke(2.U)
+          dut.io.in.bits.data.imm.poke((if (operation == 0) BigInt(8) else addressMask).U)
+          dut.io.in.bits.data.src(0).poke(((target + 2) & addressMask).U)
+          dut.io.in.valid.poke(true.B)
+          val cause = if (enabled) enabledCause else 0
+          dut.io.out.valid.expect(true.B)
+          dut.io.out.bits.ctrl.robIdx.value.expect(12.U)
+          dut.io.out.bits.ctrl.pdest.expect(3.U)
+          dut.io.out.bits.ctrl.exceptionVec.get.zipWithIndex.foreach { case (bit, index) =>
+            bit.expect((cause != 0 && cause == index).B)
+          }
+          dut.io.out.bits.ctrl.rfWen.get.expect((cause == 0).B)
+          dut.io.out.bits.res.data.expect((if (cause == 0) BigInt("80000004", 16) else BigInt(0)).U)
+          dut.io.out.bits.res.redirect.get.valid.expect((cause == 0).B)
+          if (cause == 0) {
+            dut.io.out.bits.res.redirect.get.bits.fullTarget.expect(target.U)
+            dut.io.out.bits.res.redirect.get.bits.cfiUpdate.isMisPred.expect(false.B)
+          }
+          dut.io.out.bits.ctrl.fdiException.foreach { record =>
+            record.tval.expect((if (cause == 24 || cause == 25) target else BigInt(0)).U)
+            record.reason.expect((if (cause == 24 || cause == 25) 4 else 0).U)
+          }
+          dut.io.fdiCallReturnPC.foreach(_.valid.expect(false.B))
+          dut.clock.step()
+          dut.io.in.valid.poke(false.B)
+          ordinaryCases += 1
+        }
+        val jalTarget = BigInt("80000008", 16)
+        val highTarget = BigInt("8000000080010000", 16)
+        val lowTarget = BigInt("80010000", 16)
+        ordinary("jal-range", 0, jalTarget, 0, bounds = Some(jalTarget -> (jalTarget + 8)))
+        ordinary("jal-denied", 0, jalTarget, 24)
+        ordinary("jal-hs-denied", 0, jalTarget, 25, privilege = 1)
+        ordinary("jal-guest", 0, jalTarget, 2, virtual = true, trusted = true, closed = true)
+        ordinary("jal-guest-disabled", 0, jalTarget, 0, virtual = true, policyEnabled = false)
+        ordinary("jal-trusted", 0, jalTarget, 0, trusted = true)
+        ordinary("jal-closed", 0, jalTarget, 0, closed = true)
+        ordinary("jalr-high-range", 1, highTarget, 0, bounds = Some(highTarget -> (highTarget + 8)))
+        ordinary("jalr-same-low-bits", 1, highTarget, 24, bounds = Some(lowTarget -> (lowTarget + 8)))
+        ordinary("jalr-high-return", 1, highTarget, 0, special = highTarget)
+        ordinary("jalr-odd-return", 1, highTarget, 24, special = highTarget + 1)
+        ordinary("jalr-zero-disabled-specials", 1, 0, 24)
+        ordinary("jalr-zero-range", 1, 0, 0, bounds = Some(BigInt(0) -> BigInt(8)))
+        // AUIPC must bypass the entire target policy, even for an enabled
+        // guest with no permitted target and an untrusted source tag.
+        dut.io.in.valid.poke(false.B)
+        clear(dut.io.in.bits)
+        dut.io.fdiSource.foreach { source =>
+          clear(source)
+          source.sourcePrivilege.poke(0.U)
+          source.sourceVirtual.poke(true.B)
+          source.policy.uEnable.poke(true.B)
+        }
+        dut.io.fdiTargets.foreach(clear)
+        dut.io.in.bits.ctrl.fuOpType.poke(2.U)
+        dut.io.in.bits.ctrl.rfWen.get.poke(true.B)
+        dut.io.in.bits.ctrl.fdiNotTrusted.foreach(_.poke(true.B))
+        dut.io.in.bits.data.pc.get.poke(BigInt("80000000", 16).U)
+        dut.io.in.bits.data.imm.poke(BigInt("1000", 16).U)
+        dut.io.in.valid.poke(true.B)
+        dut.io.out.valid.expect(true.B)
+        dut.io.out.bits.res.data.expect(BigInt("80001000", 16).U)
+        dut.io.out.bits.ctrl.rfWen.get.expect(true.B)
+        dut.io.out.bits.ctrl.exceptionVec.get.foreach(_.expect(false.B))
+        dut.io.out.bits.res.redirect.get.valid.expect(false.B)
+        dut.io.fdiCallReturnPC.foreach(_.valid.expect(false.B))
+        dut.io.out.bits.ctrl.fdiException.foreach { record =>
+          record.tval.expect(0.U)
+          record.reason.expect(0.U)
+        }
+        dut.clock.step()
+        dut.io.in.valid.poke(false.B)
       }
       Files.write(root.resolve(s"jump-${if (enabled) "on" else "off"}-summary.json"),
-        s"""{"has_fdi":$enabled,"production_jump":true,"ordinary_target_link_checked":true,"call_permission_cases":$callCases,"call_scope":"FU handshakes; owner and retirement are separate integration checks"}""".getBytes(StandardCharsets.UTF_8))
+        s"""{"has_fdi":$enabled,"production_jump":true,"ordinary_target_link_checked":true,"call_permission_cases":$callCases,"ordinary_permission_cases":$ordinaryCases,"auipc_policy_bypass_checked":true,"call_scope":"FU handshakes; owner and retirement are separate integration checks"}""".getBytes(StandardCharsets.UTF_8))
     }
   }
 

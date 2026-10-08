@@ -4,8 +4,8 @@ import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import chisel3.util._
 import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
-import xiangshan.backend.fu.{CSRFileIO, FDIControlFlowSource, FenceIO}
-import xiangshan.backend.fu.NewCSR.{FDIMainCfgAddress, FDIMainCfgBundle}
+import xiangshan.backend.fu.{CSRFileIO, FDIControlFlowSource, FDIControlFlowTargets, FenceIO}
+import xiangshan.backend.fu.NewCSR.{FDIBoundRegisterAddress, FDIJumpCfgBundle, FDIMainCfgAddress, FDIMainCfgBundle, FDISpecialRegisterAddress}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.issue.SchdBlockParams
 import xiangshan.{HasXSParameter, Redirect, XSBundle}
@@ -74,6 +74,20 @@ class ExuBlockImp(
         field := mainCfg.elements(name).asUInt.asBool
       }
       exus.foreach(_.io.fdiSource.foreach(_ := source))
+
+      val targets = Wire(new FDIControlFlowTargets)
+      val jumpCfg = Wire(new FDIJumpCfgBundle)
+      jumpCfg := fdiMirror.get.word(FDIBoundRegisterAddress.jumpCfg)
+      val entryValids = Seq(jumpCfg.V0, jumpCfg.V1, jumpCfg.V2, jumpCfg.V3)
+      targets.entries.zipWithIndex.foreach { case (entry, i) =>
+        entry.entryValid := entryValids(i).asBool
+        entry.boundLo := fdiMirror.get.word(FDIBoundRegisterAddress.jumpBoundLo0 + 2 * i)
+        entry.boundHi := fdiMirror.get.word(FDIBoundRegisterAddress.jumpBoundHi0 + 2 * i)
+      }
+      targets.mainCallEntry := fdiMirror.get.word(FDISpecialRegisterAddress.mainCallEntry)
+      targets.returnPC := fdiMirror.get.word(FDISpecialRegisterAddress.returnPC)
+      targets.activeZoneReturnPC := fdiMirror.get.word(FDISpecialRegisterAddress.activeZoneReturnPC)
+      exus.foreach(_.io.fdiTargets.foreach(_ := targets))
 
       // Serialized calls and software CSR writes share the existing owner and
       // distribution port. No extra arbitration can postpone a completed call.

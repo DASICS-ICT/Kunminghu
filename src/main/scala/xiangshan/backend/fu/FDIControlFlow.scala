@@ -11,3 +11,12 @@ class FDIControlFlowSource extends Bundle {
   val sourceVirtual = Bool()
   val policy = new FDIPolicyConfig
 }
+
+// These wires expose only the existing ControlFlow mirror; target comparison
+// uses all address bits and the original P06 zero-special-target rule.
+class FDIControlFlowTargets extends Bundle {
+  val entries = Vec(4, new FDIJumpBoundEntry)
+  val mainCallEntry = UInt(64.W)
+  val returnPC = UInt(64.W)
+  val activeZoneReturnPC = UInt(64.W)
+}

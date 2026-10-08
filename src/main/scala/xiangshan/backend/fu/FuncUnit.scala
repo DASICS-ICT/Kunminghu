@@ -106,6 +106,7 @@ class FuncUnitIO(cfg: FuConfig)(implicit p: Parameters) extends XSBundle {
   val vlIsVlmax = OptionWrapper(cfg.writeVlRf, Output(Bool()))
   val instrAddrTransType = Option.when(cfg.isJmp || cfg.isBrh)(Input(new AddrTransType))
   val fdiSource = Option.when(HasFDI && cfg.isJmp)(Input(new FDIControlFlowSource))
+  val fdiTargets = Option.when(HasFDI && cfg.isJmp)(Input(new FDIControlFlowTargets))
   // The Jump output handshake is the call effect; this pulse has no retry or
   // independent ready. The CSR owner receives the same cycle's complete link.
   val fdiCallReturnPC = Option.when(HasFDI && cfg.isJmp)(Output(Valid(UInt(XLEN.W))))

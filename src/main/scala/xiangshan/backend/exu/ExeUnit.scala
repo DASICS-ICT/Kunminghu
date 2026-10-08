@@ -22,7 +22,7 @@ import chisel3.experimental.hierarchy.{Definition, instantiable}
 import chisel3.util._
 import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 import utility._
-import xiangshan.backend.fu.{CSRFileIO, FDIControlFlowSource, FenceIO, FuncUnitInput}
+import xiangshan.backend.fu.{CSRFileIO, FDIControlFlowSource, FDIControlFlowTargets, FenceIO, FuncUnitInput}
 import xiangshan.backend.Bundles.{ExuInput, ExuOutput, MemExuInput, MemExuOutput}
 import xiangshan.{AddrTransType, FPUCtrlSignals, HasXSParameter, Redirect, XSBundle, XSModule}
 import xiangshan.backend.datapath.WbConfig.{PregWB, _}
@@ -46,6 +46,7 @@ class ExeUnitIO(params: ExeUnitParams)(implicit p: Parameters) extends XSBundle 
   val vlIsVlmax = Option.when(params.writeVConfig)(Output(Bool()))
   val instrAddrTransType = Option.when(params.hasJmpFu || params.hasBrhFu)(Input(new AddrTransType))
   val fdiSource = Option.when(HasFDI && params.hasJmpFu)(Input(new FDIControlFlowSource))
+  val fdiTargets = Option.when(HasFDI && params.hasJmpFu)(Input(new FDIControlFlowTargets))
   val fdiCallReturnPC = Option.when(HasFDI && params.hasJmpFu)(Output(Valid(UInt(XLEN.W))))
   val fdiCallReturnPCIn = Option.when(HasFDI && params.hasCSR)(Input(Valid(UInt(XLEN.W))))
 }
@@ -427,6 +428,7 @@ class ExeUnitImp(
   io.vlIsVlmax.foreach(exuio => funcUnits.foreach(fu => fu.io.vlIsVlmax.foreach(fuio => exuio := fuio)))
   io.instrAddrTransType.foreach(exuio => funcUnits.foreach(fu => fu.io.instrAddrTransType.foreach(fuio => fuio := exuio)))
   io.fdiSource.foreach(source => funcUnits.foreach(fu => fu.io.fdiSource.foreach(_ := source)))
+  io.fdiTargets.foreach(targets => funcUnits.foreach(fu => fu.io.fdiTargets.foreach(_ := targets)))
   io.fdiCallReturnPCIn.foreach(source => funcUnits.foreach(fu => fu.io.fdiCallReturnPCIn.foreach(_ := source)))
   io.fdiCallReturnPC.foreach { effect =>
     val calls = funcUnits.flatMap(_.io.fdiCallReturnPC)

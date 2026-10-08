@@ -543,10 +543,15 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
     s"io.mem.writeback(${io.mem.writeBack.size})"
   )
   bypassNetwork.io.fromExus.mem.flatten.zip(io.mem.writeBack).foreach { case (sink, source) =>
-    sink.valid := source.valid
+    // Fault completion still reaches ROB below; rejected load data never enters bypass storage.
+    val fdiLoadFault = if (HasFDI) source.bits.uop.fuType === FuType.ldu.U &&
+      (source.bits.uop.exceptionVec(ExceptionNO.dasicsU) ||
+        source.bits.uop.exceptionVec(ExceptionNO.dasicsS) ||
+        source.bits.uop.exceptionVec(ExceptionNO.illegalInstr)) else false.B
+    sink.valid := source.valid && !fdiLoadFault
     sink.bits.intWen := source.bits.uop.rfWen && source.bits.isFromLoadUnit
     sink.bits.pdest := source.bits.uop.pdest
-    sink.bits.data := source.bits.data
+    sink.bits.data := Mux(fdiLoadFault, 0.U, source.bits.data)
   }
 
 

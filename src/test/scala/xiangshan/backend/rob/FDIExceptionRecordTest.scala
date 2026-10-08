@@ -105,7 +105,7 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
       val legacyByName = Map(
         "jmp" -> Set.empty[Int], "brh" -> Set.empty[Int],
         "csr" -> Set(2, 22, 3, 8, 9, 10, 11),
-        "ldu" -> Set(4, 5, 13, 21, 3, 19), "sta" -> Set(6, 7, 15, 23, 3),
+        "ldu" -> Set(2, 4, 5, 13, 21, 3, 19), "sta" -> Set(6, 7, 15, 23, 3),
         "hylda" -> Set(4, 5, 13, 21), "hysta" -> Set(6, 7, 15, 23),
         "mou" -> Set(4, 5, 13, 21, 3, 19, 6, 7, 15, 23),
         "vldu" -> Set(4, 5, 13, 21, 3), "vstu" -> Set(6, 7, 15, 23, 3),

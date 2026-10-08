@@ -227,6 +227,10 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val allocated = RegInit(VecInit(List.fill(LoadQueueReplaySize)(false.B))) // The control signals need to explicitly indicate the initial value
   val scheduled = RegInit(VecInit(List.fill(LoadQueueReplaySize)(false.B)))
   val uop = Reg(Vec(LoadQueueReplaySize, new DynInst))
+  // Replay address RAM is only an index-width VA; permission needs the original effective VA.
+  val fdiFullva = Option.when(HasFDI)(Reg(Vec(LoadQueueReplaySize, UInt(XLEN.W))))
+  val fdiSourcePrivilege = Option.when(HasFDI)(Reg(Vec(LoadQueueReplaySize, UInt(2.W))))
+  val fdiSourceVirtual = Option.when(HasFDI)(Reg(Vec(LoadQueueReplaySize, Bool())))
   val vecReplay = Reg(Vec(LoadQueueReplaySize, new VecReplayInfo))
   val vaddrModule = Module(new LqVAddrModule(
     gen = UInt(VAddrBits.W),
@@ -531,6 +535,9 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   for (i <- 0 until LoadPipelineWidth) {
     val s1_replayIdx = s1_oldestSel(i).bits
     val s2_replayUop = RegEnable(uop(s1_replayIdx), s1_can_go(i))
+    val s2_fdiFullva = Option.when(HasFDI)(RegEnable(fdiFullva.get(s1_replayIdx), s1_can_go(i)))
+    val s2_fdiSourcePrivilege = Option.when(HasFDI)(RegEnable(fdiSourcePrivilege.get(s1_replayIdx), s1_can_go(i)))
+    val s2_fdiSourceVirtual = Option.when(HasFDI)(RegEnable(fdiSourceVirtual.get(s1_replayIdx), s1_can_go(i)))
     val s2_vecReplay = RegEnable(vecReplay(s1_replayIdx), s1_can_go(i))
     val s2_replayMSHRId = RegEnable(missMSHRId(s1_replayIdx), s1_can_go(i))
     val s2_replacementUpdated = RegEnable(replacementUpdated(s1_replayIdx), s1_can_go(i))
@@ -544,6 +551,11 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     replay_req(i).valid             := s2_oldestSel(i).valid
     replay_req(i).bits              := DontCare
     replay_req(i).bits.uop          := s2_replayUop
+    if (HasFDI) {
+      replay_req(i).bits.fullva := s2_fdiFullva.get
+      replay_req(i).bits.fdiSourcePrivilege.get := s2_fdiSourcePrivilege.get
+      replay_req(i).bits.fdiSourceVirtual.get := s2_fdiSourceVirtual.get
+    }
     replay_req(i).bits.uop.exceptionVec(loadAddrMisaligned) := false.B
     replay_req(i).bits.isvec        := s2_vecReplay.isvec
     replay_req(i).bits.isLastElem   := s2_vecReplay.isLastElem
@@ -642,6 +654,11 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       allocated(enqIndex) := true.B
       scheduled(enqIndex) := false.B
       uop(enqIndex)       := enq.bits.uop
+      if (HasFDI) {
+        fdiFullva.get(enqIndex) := enq.bits.fullva
+        fdiSourcePrivilege.get(enqIndex) := enq.bits.fdiSourcePrivilege.get
+        fdiSourceVirtual.get(enqIndex) := enq.bits.fdiSourceVirtual.get
+      }
       vecReplay(enqIndex).isvec := enq.bits.isvec
       vecReplay(enqIndex).isLastElem := enq.bits.isLastElem
       vecReplay(enqIndex).is128bit := enq.bits.is128bit

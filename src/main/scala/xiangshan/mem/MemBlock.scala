@@ -38,6 +38,7 @@ import xiangshan.backend.exu.MemExeUnit
 import xiangshan.backend.fu._
 import xiangshan.backend.fu.FuType._
 import xiangshan.backend.fu.NewCSR.{CsrTriggerBundle, TriggerUtil, PFEvent}
+import xiangshan.backend.fu.NewCSR.{FDIBoundRegisterAddress, FDILibCfgBundle, FDIMainCfgAddress, FDIMainCfgBundle}
 import xiangshan.backend.fu.util.{CSRConst, SdtrigExt}
 import xiangshan.backend.{BackendToTopBundle, TopToBackendBundle}
 import xiangshan.backend.rob.{RobDebugRollingIO, RobPtr, RobLsqIO}
@@ -661,6 +662,35 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   // ptw
   val sfence = RegNext(RegNext(io.ooo_to_mem.sfence))
   val tlbcsr = RegNext(RegNext(io.ooo_to_mem.tlbCsr))
+  val fdiConfig = Option.when(HasFDI) {
+    val config = Wire(new FDIMemoryConfig)
+    val mirror = fdiMirror.get
+    val mainCfg = Wire(new FDIMainCfgBundle)
+    val libCfg = Wire(new FDILibCfgBundle)
+    mainCfg := mirror.word(FDIMainCfgAddress.sMainCfg)
+    libCfg := mirror.word(FDIBoundRegisterAddress.libCfg)
+    config.policy.uEnable := mainCfg.uEnable.asBool
+    config.policy.sEnable := mainCfg.sEnable.asBool
+    config.policy.uCloseRead := mainCfg.uCloseRead.asBool
+    config.policy.uCloseWrite := mainCfg.uCloseWrite.asBool
+    config.policy.uCloseJump := mainCfg.uCloseJump.asBool
+    config.policy.uCloseEcall := mainCfg.uCloseEcall.asBool
+    config.policy.sCloseRead := mainCfg.sCloseRead.asBool
+    config.policy.sCloseWrite := mainCfg.sCloseWrite.asBool
+    config.policy.sCloseJump := mainCfg.sCloseJump.asBool
+    config.policy.sCloseEcall := mainCfg.sCloseEcall.asBool
+    for ((entry, i) <- config.entries.zipWithIndex) {
+      entry.boundLo := mirror.word(FDIBoundRegisterAddress.libBoundLo0 + 2 * i)
+      entry.boundHi := mirror.word(FDIBoundRegisterAddress.libBoundHi0 + 2 * i)
+      entry.entryValid := libCfg.elements(s"V$i").asUInt.asBool
+      entry.readAllowed := libCfg.elements(s"R$i").asUInt.asBool
+      entry.writeAllowed := libCfg.elements(s"W$i").asUInt.asBool
+    }
+    // MPRV/MPV select data translation, never the origin of the issued instruction.
+    config.sourcePrivilege := tlbcsr.priv.imode
+    config.sourceVirtual := csrCtrl.virtMode
+    config
+  }
   private val ptw = outer.ptw.module
   private val ptw_to_l2_buffer = outer.ptw_to_l2_buffer.module
   private val l1d_to_l2_buffer = outer.l1d_to_l2_buffer.module
@@ -917,6 +947,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
     // loadqueue old ptr
     loadUnits(i).io.lsq.lqDeqPtr := lsq.io.lqDeqPtr
     loadUnits(i).io.csrCtrl       <> csrCtrl
+    loadUnits(i).io.fdiConfig.foreach(_ := fdiConfig.get)
     // dcache refill req
   // loadUnits(i).io.refill           <> delayedDcacheRefill
     // dtlb

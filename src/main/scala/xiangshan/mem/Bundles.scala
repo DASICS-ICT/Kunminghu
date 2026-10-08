@@ -27,6 +27,7 @@ import xiangshan._
 import xiangshan.backend.Bundles._
 import xiangshan.backend.rob.RobPtr
 import xiangshan.backend.fu.FenceToSbuffer
+import xiangshan.backend.fu.{FDIBoundEntry, FDIPolicyConfig}
 import xiangshan.backend.fu.vector.Bundles._
 import xiangshan.backend.Bundles._
 import xiangshan.mem.prefetch.PrefetchReqBundle
@@ -37,12 +38,23 @@ import math._
 
 object Bundles {
 
+  // Live block-local configuration; each permission request samples it on acceptance.
+  class FDIMemoryConfig extends Bundle {
+    val policy = new FDIPolicyConfig
+    val entries = Vec(16, new FDIBoundEntry)
+    val sourcePrivilege = UInt(2.W)
+    val sourceVirtual = Bool()
+  }
+
   class LsPipelineBundle(implicit p: Parameters) extends XSBundle
     with HasDCacheParameters
     with HasVLSUParameters {
     val uop = new DynInst
     val vaddr = UInt(VAddrBits.W)
     val fullva = UInt(XLEN.W)
+    // Instruction origin survives retries independently of the data translation mode.
+    val fdiSourcePrivilege = Option.when(HasFDI)(UInt(2.W))
+    val fdiSourceVirtual = Option.when(HasFDI)(Bool())
     val vaNeedExt = Bool()
     val paddr = UInt(PAddrBits.W)
     val gpaddr = UInt(XLEN.W)

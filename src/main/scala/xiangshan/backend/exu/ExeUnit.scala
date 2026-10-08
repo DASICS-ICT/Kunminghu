@@ -22,7 +22,7 @@ import chisel3.experimental.hierarchy.{Definition, instantiable}
 import chisel3.util._
 import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 import utility._
-import xiangshan.backend.fu.{CSRFileIO, FenceIO, FuncUnitInput}
+import xiangshan.backend.fu.{CSRFileIO, FDIControlFlowSource, FenceIO, FuncUnitInput}
 import xiangshan.backend.Bundles.{ExuInput, ExuOutput, MemExuInput, MemExuOutput}
 import xiangshan.{AddrTransType, FPUCtrlSignals, HasXSParameter, Redirect, XSBundle, XSModule}
 import xiangshan.backend.datapath.WbConfig.{PregWB, _}
@@ -45,6 +45,9 @@ class ExeUnitIO(params: ExeUnitParams)(implicit p: Parameters) extends XSBundle 
   val vlIsZero = Option.when(params.writeVConfig)(Output(Bool()))
   val vlIsVlmax = Option.when(params.writeVConfig)(Output(Bool()))
   val instrAddrTransType = Option.when(params.hasJmpFu || params.hasBrhFu)(Input(new AddrTransType))
+  val fdiSource = Option.when(HasFDI && params.hasJmpFu)(Input(new FDIControlFlowSource))
+  val fdiCallReturnPC = Option.when(HasFDI && params.hasJmpFu)(Output(Valid(UInt(XLEN.W))))
+  val fdiCallReturnPCIn = Option.when(HasFDI && params.hasCSR)(Input(Valid(UInt(XLEN.W))))
 }
 
 class ExeUnit(val exuParams: ExeUnitParams)(implicit p: Parameters) extends LazyModule {
@@ -423,6 +426,16 @@ class ExeUnitImp(
   io.vlIsZero.foreach(exuio => funcUnits.foreach(fu => fu.io.vlIsZero.foreach(fuio => exuio := fuio)))
   io.vlIsVlmax.foreach(exuio => funcUnits.foreach(fu => fu.io.vlIsVlmax.foreach(fuio => exuio := fuio)))
   io.instrAddrTransType.foreach(exuio => funcUnits.foreach(fu => fu.io.instrAddrTransType.foreach(fuio => fuio := exuio)))
+  io.fdiSource.foreach(source => funcUnits.foreach(fu => fu.io.fdiSource.foreach(_ := source)))
+  io.fdiCallReturnPCIn.foreach(source => funcUnits.foreach(fu => fu.io.fdiCallReturnPCIn.foreach(_ := source)))
+  io.fdiCallReturnPC.foreach { effect =>
+    val calls = funcUnits.flatMap(_.io.fdiCallReturnPC)
+    require(calls.nonEmpty)
+    effect.valid := VecInit(calls.map(_.valid)).asUInt.orR
+    effect.bits := Mux1H(calls.map(call => call.valid -> call.bits))
+    assert(PopCount(VecInit(calls.map(_.valid))) <= 1.U,
+      "An execution unit cannot complete multiple FDICALL effects")
+  }
 
   // debug info
   io.out.bits.debug     := 0.U.asTypeOf(io.out.bits.debug)

@@ -4,7 +4,8 @@ import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import chisel3.util._
 import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
-import xiangshan.backend.fu.{CSRFileIO, FenceIO}
+import xiangshan.backend.fu.{CSRFileIO, FDIControlFlowSource, FenceIO}
+import xiangshan.backend.fu.NewCSR.{FDIMainCfgAddress, FDIMainCfgBundle}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.issue.SchdBlockParams
 import xiangshan.{HasXSParameter, Redirect, XSBundle}
@@ -63,6 +64,28 @@ class ExuBlockImp(
   }
   exus.find(_.io.csrio.nonEmpty).map(_.io.csrio.get).foreach { csrio =>
     exus.map(_.io.instrAddrTransType.foreach(_ := csrio.instrAddrTransType))
+    if (wrapper.HasFDI) {
+      val source = Wire(new FDIControlFlowSource)
+      val mainCfg = Wire(new FDIMainCfgBundle)
+      mainCfg := fdiMirror.get.word(FDIMainCfgAddress.sMainCfg)
+      source.sourcePrivilege := csrio.tlb.priv.imode
+      source.sourceVirtual := csrio.customCtrl.virtMode
+      source.policy.elements.foreach { case (name, field) =>
+        field := mainCfg.elements(name).asUInt.asBool
+      }
+      exus.foreach(_.io.fdiSource.foreach(_ := source))
+
+      // Serialized calls and software CSR writes share the existing owner and
+      // distribution port. No extra arbitration can postpone a completed call.
+      val calls = exus.flatMap(_.io.fdiCallReturnPC)
+      require(calls.nonEmpty)
+      val effect = Wire(Valid(UInt(wrapper.XLEN.W)))
+      effect.valid := VecInit(calls.map(_.valid)).asUInt.orR
+      effect.bits := Mux1H(calls.map(call => call.valid -> call.bits))
+      assert(PopCount(VecInit(calls.map(_.valid))) <= 1.U,
+        "Serialized FDICALL instructions must have exclusive completion")
+      exus.foreach(_.io.fdiCallReturnPCIn.foreach(_ := effect))
+    }
   }
   val aluFireSeq = exus.filter(_.wrapper.exuParams.fuConfigs.contains(AluCfg)).map(_.io.in.fire)
   for (i <- 0 until (aluFireSeq.size + 1)){

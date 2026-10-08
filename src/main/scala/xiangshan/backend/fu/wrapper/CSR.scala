@@ -152,6 +152,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       in.bits.redirectFlush := redirectFlush
   }
   csrMod.io.trapInst := trapInstMod.io.currentTrapInst
+  csrMod.io.fdiCallReturnPC.foreach(_ := io.fdiCallReturnPCIn.get)
   csrMod.io.fetchMalTval := trapTvalMod.io.tval
   csrMod.io.fromMem.excpVA  := csrIn.memExceptionVAddr
   csrMod.io.fromMem.excpGPA := csrIn.memExceptionGPAddr
@@ -434,7 +435,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       custom.distribute_csr.w.bits.data := wdataReg
       csrMod.io.distributedFDI.foreach { fdi =>
         assert(!(fdi.w.valid && csrMod.io.distributedWenLegal),
-          "A software CSR effect selects one distribution source")
+          "Software CSR and implicit call effects select one distribution source")
         custom.distribute_csr.w.valid := csrMod.io.distributedWenLegal || fdi.w.valid
         custom.distribute_csr.w.bits.addr := Mux(fdi.w.valid, fdi.w.bits.addr, waddrReg)
         custom.distribute_csr.w.bits.data := Mux(fdi.w.valid, fdi.w.bits.data, wdataReg)

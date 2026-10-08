@@ -854,7 +854,6 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
   } else Array.empty
   val decode_table: Array[(BitPat, List[BitPat])] = baseDecodeTable ++ userReturnDecode ++ fdiCallDecode
   private val isFdiCallJ = HasFDI.B && (FDIInstructions.FDICALL_J === ctrl_flow.instr)
-  private val isFdiCallJR = HasFDI.B && (FDIInstructions.FDICALL_JR === ctrl_flow.instr)
 
   require(decode_table.map(_._2.length == 15).reduce(_ && _), "Decode tables have different column size")
   // assertion for LUI: only LUI should be assigned `selImm === SelImm.IMM_U && fuType === FuType.alu`
@@ -922,8 +921,6 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
 
   private val exceptionII =
     decodedInst.selImm === SelImm.INVALID_INSTR ||
-    // Recognizing a call does not authorize its architectural side effects.
-    isFdiCallJ || isFdiCallJR ||
     io.fromCSR.illegalInst.sfenceVMA  && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.sfence  ||
     io.fromCSR.illegalInst.sfencePart && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.nofence ||
     io.fromCSR.illegalInst.hfenceGVMA && FuType.FuTypeOrR(decodedInst.fuType, FuType.fence) && decodedInst.fuOpType === FenceOpType.hfence_g ||

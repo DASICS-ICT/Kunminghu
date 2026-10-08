@@ -84,14 +84,18 @@ class UserTimerDecodeTest extends AnyFlatSpec with ChiselScalatestTester {
         for (instruction <- Seq("00300073", "002000f3", "00208073")) {
           check(BigInt(instruction, 16), illegal = true, csr = false)
         }
-        // The feature switch does not implement either reserved call encoding.
+        // Exact calls decode with the feature enabled; Jump checks source permission.
         // Vary operand and immediate bits without changing the frozen opcode/funct3 mask.
         val callMask = BigInt("0000707f", 16)
         for (pattern <- Seq(BigInt("0000000b", 16), BigInt("0000100b", 16));
              operands <- Seq(BigInt(0), BigInt("123a8f80", 16), BigInt("ffff8f80", 16))) {
           val instruction = pattern | (operands & (BigInt("ffffffff", 16) ^ callMask))
           assert((instruction & callMask) == pattern)
-          check(instruction, illegal = true, csr = false)
+          check(instruction, illegal = !enabled, csr = false)
+          if (enabled) {
+            dut.io.noSpecExec.expect(true.B)
+            dut.io.blockBackward.expect(true.B)
+          }
         }
         for (function <- Seq(1, 2, 3, 5, 6, 7)) {
           val instruction = (BigInt(0x800) << 20) | (BigInt(1) << 15) | (function << 12) | (1 << 7) | 0x73

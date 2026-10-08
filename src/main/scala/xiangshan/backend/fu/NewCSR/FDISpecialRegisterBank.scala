@@ -36,6 +36,16 @@ class FDIFReasonModule(implicit p: Parameters)
   }
 }
 
+class FDIReturnPCModule(implicit p: Parameters)
+  extends CSRModule("FDIReturnPC", new FieldInitBundle) with RequireSyncReset {
+  // The producer qualifies this implicit update with the complete call's own
+  // handshake and cancellation identity, independently of software CSR access.
+  val callReturnPC = IO(Input(Valid(UInt(64.W))))
+  reg.ALL.addOtherUpdate(callReturnPC.valid, callReturnPC.bits.asTypeOf(reg.ALL))
+  reconnectReg()
+  assert(!(w.wen && callReturnPC.valid), "ReturnPC software and call effects must be exclusive")
+}
+
 // Native instances created in the caller's Module context. Each CSRModule is
 // the sole owner of its backing; this group adds no dispatch or request state.
 // The caller supplies one authorized, cancellation-qualified write effect and
@@ -44,12 +54,14 @@ class FDISpecialRegisterBank(implicit p: Parameters) {
   // FieldInitBundle retains all 64 bits, including bit zero, with reset zero.
   // Stored zero and unaligned values have no special behavior in this group.
   val mainCallEntry = Module(new CSRModule("FDIMainCallEntry", new FieldInitBundle) with RequireSyncReset).setAddr(FDISpecialRegisterAddress.mainCallEntry)
-  val returnPC = Module(new CSRModule("FDIReturnPC", new FieldInitBundle) with RequireSyncReset).setAddr(FDISpecialRegisterAddress.returnPC)
+  val returnPC = Module(new FDIReturnPCModule).setAddr(FDISpecialRegisterAddress.returnPC)
   val activeZoneReturnPC = Module(new CSRModule("FDIActiveZoneReturnPC", new FieldInitBundle) with RequireSyncReset).setAddr(FDISpecialRegisterAddress.activeZoneReturnPC)
   val fReason = Module(new FDIFReasonModule).setAddr(FDISpecialRegisterAddress.fReason)
   // Standalone software-only users do not produce architectural trap events.
   fReason.trapReason.valid := false.B
   fReason.trapReason.bits := 0.U.asTypeOf(fReason.trapReason.bits)
+  returnPC.callReturnPC.valid := false.B
+  returnPC.callReturnPC.bits := 0.U
 
   val csrMods: Seq[CSRModule[_]] = Seq(
     mainCallEntry,

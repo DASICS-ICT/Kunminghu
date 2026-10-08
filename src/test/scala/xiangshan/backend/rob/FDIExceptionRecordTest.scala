@@ -103,7 +103,7 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
         assertions += 1
       }
       val legacyByName = Map(
-        "jmp" -> Set.empty[Int], "brh" -> Set.empty[Int],
+        "jmp" -> Set(2), "brh" -> Set.empty[Int],
         "csr" -> Set(2, 22, 3, 8, 9, 10, 11),
         "ldu" -> Set(2, 4, 5, 13, 21, 3, 19), "sta" -> Set(2, 6, 7, 15, 23, 3),
         "hylda" -> Set(4, 5, 13, 21), "hysta" -> Set(6, 7, 15, 23),
@@ -269,6 +269,7 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
       val root = Paths.get(sys.props.getOrElse("e01.runRoot", throw new IllegalArgumentException("Set e01.runRoot")))
       require(root.isAbsolute && Paths.get("").toRealPath() == root.toRealPath())
       implicit val p: Parameters = parameters(enabled)
+      var callCases = 0
       test(new JumpUnit(FuConfig.JmpCfg)).withAnnotations(Seq(
         VerilatorBackendAnnotation, TargetDirAnnotation(s"rtl-jump-${if (enabled) "on" else "off"}"))) { dut =>
         def clear(data: Data): Unit = data match {
@@ -282,6 +283,9 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
         clear(dut.io.in.bits)
         clear(dut.io.flush.bits)
         dut.io.instrAddrTransType.foreach(clear)
+        dut.io.fdiSource.foreach(clear)
+        require(dut.io.fdiSource.isDefined == enabled)
+        require(dut.io.fdiCallReturnPC.isDefined == enabled)
         dut.io.in.valid.poke(false.B)
         dut.io.out.ready.poke(true.B)
         dut.io.flush.valid.poke(false.B)
@@ -302,9 +306,100 @@ class FDIExceptionRecordTest extends AnyFlatSpec with ChiselScalatestTester {
           record.tval.expect(0.U)
           record.reason.expect(0.U)
         }
+        dut.io.fdiCallReturnPC.foreach(_.valid.expect(false.B))
+
+        if (enabled) {
+          val source = dut.io.fdiSource.get
+          val call = dut.io.fdiCallReturnPC.get
+          // Independent source cases: closeJump and empty target bounds cannot
+          // authorize an illegal call or reject a legal trusted host call.
+          val sourceCases = Seq(
+            ("hu", 0, false, true, false, false, false),
+            ("hs", 1, false, false, true, false, false),
+            ("hu-disabled", 0, false, false, true, false, true),
+            ("hs-disabled", 1, false, true, false, false, true),
+            ("hu-untrusted", 0, false, true, false, true, true),
+            ("hs-untrusted", 1, false, false, true, true, true),
+            ("machine", 3, false, true, true, false, true),
+            ("virtual-user", 0, true, true, true, false, true),
+            ("virtual-supervisor", 1, true, true, true, false, true),
+            ("reserved", 2, false, true, true, false, true),
+            ("virtual-machine", 3, true, true, true, false, true))
+          for ((name, privilege, virtual, uEnable, sEnable, notTrusted, illegal) <- sourceCases;
+               operation <- Seq(4, 5); writeLink <- Seq(false, true)) {
+            withClue(s"call $name operation=$operation writeLink=$writeLink: ") {
+              clear(source.policy)
+              source.sourcePrivilege.poke(privilege.U)
+              source.sourceVirtual.poke(virtual.B)
+              source.policy.uEnable.poke(uEnable.B)
+              source.policy.sEnable.poke(sEnable.B)
+              source.policy.uCloseJump.poke(true.B)
+              source.policy.sCloseJump.poke(true.B)
+              dut.io.in.bits.ctrl.fdiNotTrusted.get.poke(notTrusted.B)
+              dut.io.in.bits.ctrl.fuOpType.poke(operation.U)
+              dut.io.in.bits.ctrl.rfWen.get.poke(writeLink.B)
+              dut.io.in.bits.ctrl.robIdx.value.poke(callCases.U)
+              dut.io.in.bits.data.src(0).poke(BigInt("80010002", 16).U)
+              dut.io.in.bits.data.imm.poke((if (operation == 4) BigInt(8) else (BigInt(1) << 64) - 1).U)
+              val target = if (operation == 4) BigInt("80000008", 16) else BigInt("80010000", 16)
+              dut.io.in.bits.ctrl.predictInfo.get.target.poke(target.U)
+              dut.io.in.bits.ctrl.predictInfo.get.taken.poke(true.B)
+              dut.io.out.valid.expect(true.B)
+              dut.io.out.bits.ctrl.exceptionVec.get.zipWithIndex.foreach { case (bit, cause) =>
+                bit.expect((illegal && cause == 2).B)
+              }
+              dut.io.out.bits.ctrl.rfWen.get.expect((writeLink && !illegal).B)
+              dut.io.out.bits.res.data.expect((if (illegal) BigInt(0) else BigInt("80000004", 16)).U)
+              dut.io.out.bits.res.redirect.get.valid.expect((!illegal).B)
+              call.valid.expect((!illegal).B)
+              if (!illegal) {
+                call.bits.expect(BigInt("80000004", 16).U)
+                dut.io.out.bits.res.redirect.get.bits.fullTarget.expect(target.U)
+                dut.io.out.bits.res.redirect.get.bits.cfiUpdate.isMisPred.expect(false.B)
+              }
+              dut.clock.step()
+              callCases += 1
+            }
+          }
+          source.sourcePrivilege.poke(0.U)
+          source.sourceVirtual.poke(false.B)
+          source.policy.uEnable.poke(true.B)
+          dut.io.in.bits.ctrl.fdiNotTrusted.get.poke(false.B)
+          dut.io.in.bits.ctrl.fuOpType.poke(4.U)
+          dut.io.in.bits.ctrl.rfWen.get.poke(true.B)
+          dut.io.in.bits.ctrl.robIdx.value.poke(8.U)
+          dut.io.in.bits.data.imm.poke(8.U)
+          dut.io.out.ready.poke(false.B)
+          for (_ <- 0 until 3) {
+            dut.io.out.valid.expect(true.B)
+            dut.io.in.ready.expect(false.B)
+            call.valid.expect(false.B)
+            dut.io.out.bits.res.data.expect(BigInt("80000004", 16).U)
+            dut.clock.step()
+          }
+          dut.io.out.ready.poke(true.B)
+          for ((flushRob, flushSelf, survives) <- Seq((7, false, false), (8, true, false),
+                 (8, false, true), (9, true, true))) {
+            dut.io.flush.valid.poke(true.B)
+            dut.io.flush.bits.robIdx.value.poke(flushRob.U)
+            dut.io.flush.bits.level.poke(if (flushSelf) RedirectLevel.flush else RedirectLevel.flushAfter)
+            dut.io.out.valid.expect(survives.B)
+            dut.io.out.bits.res.redirect.get.valid.expect(survives.B)
+            call.valid.expect(survives.B)
+            dut.clock.step()
+          }
+          dut.io.flush.valid.poke(false.B)
+          dut.reset.poke(true.B)
+          dut.io.out.valid.expect(false.B)
+          call.valid.expect(false.B)
+          dut.clock.step()
+          dut.io.in.valid.poke(false.B)
+          dut.reset.poke(false.B)
+          call.valid.expect(false.B)
+        }
       }
       Files.write(root.resolve(s"jump-${if (enabled) "on" else "off"}-summary.json"),
-        s"""{"has_fdi":$enabled,"production_jump":true,"ordinary_target_link_checked":true}""".getBytes(StandardCharsets.UTF_8))
+        s"""{"has_fdi":$enabled,"production_jump":true,"ordinary_target_link_checked":true,"call_permission_cases":$callCases,"call_scope":"FU handshakes; owner and retirement are separate integration checks"}""".getBytes(StandardCharsets.UTF_8))
     }
   }
 

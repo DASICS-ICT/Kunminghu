@@ -138,6 +138,7 @@ class NewCSR(implicit val p: Parameters) extends Module
       val criticalErrorState = Input(Bool())
     })
     val in = Flipped(DecoupledIO(new NewCSRInput))
+    val fdiCallReturnPC = Option.when(HasFDI)(Input(Valid(UInt(XLEN.W))))
     val huEntry = Option.when(HasFDI)(new HUEntryPort)
     val interruptCandidate = Option.when(HasFDI)(Output(Valid(new InterruptDescriptor)))
     val huCandidateKill = Option.when(HasFDI)(Output(Bool()))
@@ -667,9 +668,19 @@ class NewCSR(implicit val p: Parameters) extends Module
     val finalData = Mux1H(effects.map { case (address, effect) => effect -> finalWords(address) })
     val distribution = io.distributedFDI.get.w
     fdiSoftwareWriteEffect := effects.map(_._2).reduce(_ || _)
-    distribution.valid := fdiSoftwareWriteEffect
-    distribution.bits.addr := Mux1H(effects.map { case (address, effect) => effect -> address.U(12.W) })
-    distribution.bits.data := finalData
+    // The call is already qualified at Jump completion. Its implicit owner
+    // update must not inherit a different software slot's redirectFlush or
+    // C07 software-write recovery obligation.
+    val call = io.fdiCallReturnPC.get
+    val callEffect = call.valid && !reset.asBool
+    fdiSpecial.get.returnPC.callReturnPC.valid := callEffect
+    fdiSpecial.get.returnPC.callReturnPC.bits := call.bits
+    assert(!(callEffect && fdiSoftwareWriteEffect),
+      "A completed FDICALL cannot compete with a software FDI write")
+    distribution.valid := fdiSoftwareWriteEffect || callEffect
+    distribution.bits.addr := Mux(callEffect, FDISpecialRegisterAddress.returnPC.U,
+      Mux1H(effects.map { case (address, effect) => effect -> address.U(12.W) }))
+    distribution.bits.data := Mux(callEffect, call.bits, finalData)
     fdiCSRMap.values.foreach { case (port, _) => port.wdata := finalData }
     assert(PopCount(VecInit(effects.map(_._2))) <= 1.U,
       "Only one accepted FDI write may update and distribute each cycle")

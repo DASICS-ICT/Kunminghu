@@ -149,7 +149,7 @@ class FDICallDecodeTest extends AnyFlatSpec with ChiselScalatestTester {
           dut.io.ftqPC.poke(pc.U)
           dut.clock.step()
           // Architectural call completion is separately authorized by the execution path.
-          dut.io.illegal.expect(true.B)
+          dut.io.illegal.expect((!enabled).B)
           if (enabled) {
             dut.io.jump.expect(true.B)
             dut.io.selector.expect(16.U)
@@ -181,7 +181,7 @@ class FDICallDecodeTest extends AnyFlatSpec with ChiselScalatestTester {
           dut.io.slot.poke(3.U)
           dut.io.ftqPC.poke(BigInt("80000000", 16).U)
           dut.clock.step()
-          dut.io.illegal.expect(true.B)
+          dut.io.illegal.expect((!enabled).B)
           if (enabled) {
             dut.io.selector.expect(4.U)
             dut.io.func.expect(5.U)

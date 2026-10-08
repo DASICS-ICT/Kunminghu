@@ -232,7 +232,7 @@ object FuConfig {
     piped = true,
     writeIntRf = true,
     immType = Set(SelImm.IMM_I, SelImm.IMM_UJ, SelImm.IMM_U, SelImm.IMM_FDIJ),
-    exceptionOut = Seq(dasicsU, dasicsS),
+    exceptionOut = Seq(illegalInstr, dasicsU, dasicsS),
   )
 
   val BrhCfg: FuConfig = FuConfig (
@@ -849,4 +849,3 @@ object FuConfig {
     VialuCfg, VimacCfg, VppuCfg, VipuCfg, VfaluCfg, VfmaCfg, VfcvtCfg
   )
 }
-

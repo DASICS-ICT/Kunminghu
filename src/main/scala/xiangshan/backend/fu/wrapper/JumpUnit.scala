@@ -3,8 +3,8 @@ package xiangshan.backend.fu.wrapper
 import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import fudian.SignExt
-import xiangshan.RedirectLevel
-import xiangshan.backend.fu.{FuConfig, FuncUnit, JumpDataModule, PipedFuncUnit}
+import xiangshan.{ExceptionNO, JumpOpType, RedirectLevel}
+import xiangshan.backend.fu.{FDISourcePrivilege, FuConfig, FuncUnit, JumpDataModule, PipedFuncUnit}
 import xiangshan.backend.datapath.DataConfig.VAddrData
 
 
@@ -19,6 +19,16 @@ class JumpUnit(cfg: FuConfig)(implicit p: Parameters) extends PipedFuncUnit(cfg)
   private val imm = io.in.bits.data.imm
   private val func = io.in.bits.ctrl.fuOpType
   private val isRVC = io.in.bits.ctrl.preDecode.get.isRVC
+  private val live = if (HasFDI) io.in.valid && !flushed && !reset.asBool else io.in.valid
+  private val isFdiCall = func === JumpOpType.fdicallJ || func === JumpOpType.fdicallJR
+  private val illegalCall = if (HasFDI) {
+    val source = io.fdiSource.get
+    val hostUser = source.sourcePrivilege === FDISourcePrivilege.User
+    val hostSupervisor = source.sourcePrivilege === FDISourcePrivilege.Supervisor
+    val enabled = Mux(hostSupervisor, source.policy.sEnable, source.policy.uEnable)
+    isFdiCall && !(!source.sourceVirtual && (hostUser || hostSupervisor) &&
+      enabled && !io.in.bits.ctrl.fdiNotTrusted.get)
+  } else false.B
 
   jumpDataModule.io.src := src
   jumpDataModule.io.pc := pc
@@ -32,7 +42,7 @@ class JumpUnit(cfg: FuConfig)(implicit p: Parameters) extends PipedFuncUnit(cfg)
 
   val redirect = io.out.bits.res.redirect.get.bits
   val redirectValid = io.out.bits.res.redirect.get.valid
-  redirectValid := io.in.valid && !jumpDataModule.io.isAuipc
+  redirectValid := live && !jumpDataModule.io.isAuipc && !illegalCall
   redirect := 0.U.asTypeOf(redirect)
   redirect.level := RedirectLevel.flushAfter
   redirect.robIdx := io.in.bits.ctrl.robIdx
@@ -50,7 +60,15 @@ class JumpUnit(cfg: FuConfig)(implicit p: Parameters) extends PipedFuncUnit(cfg)
 //  redirect.debug_runahead_checkpoint_id := uop.debugInfo.runahead_checkpoint_id // Todo: assign it
 
   io.in.ready := io.out.ready
-  io.out.valid := io.in.valid
-  io.out.bits.res.data := jumpDataModule.io.result
+  io.out.valid := live
+  io.out.bits.res.data := Mux(illegalCall, 0.U, jumpDataModule.io.result)
   connect0LatencyCtrlSingal
+  if (HasFDI) {
+    io.out.bits.ctrl.exceptionVec.get(ExceptionNO.illegalInstr) := illegalCall
+    io.out.bits.ctrl.rfWen.get := io.in.bits.ctrl.rfWen.get && !illegalCall
+    // rd=x0 removes only the link destination. The implicit ReturnPC effect
+    // still belongs to this same successful, non-canceled output handshake.
+    io.fdiCallReturnPC.get.valid := io.out.fire && isFdiCall && !illegalCall
+    io.fdiCallReturnPC.get.bits := jumpDataModule.io.result
+  }
 }

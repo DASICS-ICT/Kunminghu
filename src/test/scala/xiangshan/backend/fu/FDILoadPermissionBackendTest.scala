@@ -14,12 +14,14 @@ import svsim.{CommonCompilationSettings, Workspace}
 import svsim.verilator.Backend
 import xiangshan.frontend.{BranchPredictionBundle, FtqPtr}
 
-class FDILoadPermissionBackendTest extends AnyFlatSpec {
+class FDILoadPermissionBackendTest(val replayCases: Boolean = false) extends AnyFlatSpec {
+  def this() = this(false)
   behavior of "Load permission with real scheduling, data bypass and precise trap completion"
   private val enabled = sys.env.getOrElse("L01_FDI_ENABLED",
     throw new IllegalArgumentException("L01_FDI_ENABLED must be explicit")).toBoolean
-  private val scenario = sys.env.getOrElse("L01_SCENARIO", "minimal")
-  require(Set("minimal", "full", "remaining").contains(scenario))
+  private val scenario = if (replayCases) "replay" else sys.env.getOrElse("L01_SCENARIO", "minimal")
+  require(Set("minimal", "full", "remaining", "replay").contains(scenario))
+  require(scenario != "replay" || replayCases, "Replay scenarios require the dedicated replay test entry")
   private val allowedData = BigInt("123456789abcdef0", 16)
   private val deniedData = BigInt("d35ec0de87654321", 16)
   private val followingData = BigInt("596a7b8c9daebfc0", 16)
@@ -267,6 +269,11 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
       dut.io.fetchReady.poke(true.B); dut.io.traceEnable.poke(false.B); dut.io.traceStall.poke(false.B)
       dut.memory.cacheReady.foreach(_.poke(true.B)); zero(dut.memory.pmp)
       dut.memory.response.foreach { response => zero(response.bits); response.valid.poke(false.B) }
+      dut.memory.retry.foreach { service =>
+        service.bankConflict.foreach(_.poke(false.B))
+        service.dataInvalid.foreach(_.poke(false.B))
+        service.dataInvalidFast.foreach(_.poke(false.B))
+      }
       dut.memory.ptw.req.foreach(_.ready.poke(true.B)); zero(dut.memory.ptw.resp.bits)
       dut.memory.ptw.resp.valid.poke(false.B)
       dut.reset.poke(true.B); dut.clock.step(10)
@@ -374,6 +381,7 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
     private var fpParentWriteCycle = -1
     private var loadStart = mutable.Map.empty[BigInt, (Int, Int)]
     private var simultaneousLanes = false
+    private val fastRetryCounts = mutable.Map.empty[BigInt, Int].withDefaultValue(0)
     private def ckey(rob: xiangshan.backend.rob.RobPtr, dest: UInt, fp: Boolean): ConsumerKey =
       ConsumerKey(pointer(rob), uint(dest), fp)
     private def owner(key: ConsumerKey): Option[BigInt] = identities.collectFirst { case (pc, found) if found == key => pc }
@@ -383,12 +391,22 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
 
     override def edge(): Unit = {
       dut.memory.response.foreach { response => zero(response.bits); response.valid.poke(false.B) }
+      dut.memory.retry.foreach { service =>
+        service.bankConflict.foreach(_.poke(false.B))
+        service.dataInvalid.foreach(_.poke(false.B))
+        service.dataInvalidFast.foreach(_.poke(false.B))
+      }
       def dataAt(address: BigInt): BigInt =
         if (address == 0x8008) independentData else if (address == 0x8040) childData else pointerData
       for (item <- pending if item.accepted + 2 == cycle) {
         val response = dut.memory.response(item.lane)
         response.valid.poke(true.B); response.bits.id.poke(item.id.U)
         val data = dataAt(item.address); response.bits.data.poke((data | (data << 64)).U)
+        dut.memory.retry.foreach { service =>
+          // A single bank conflict uses the real same-lane fast replay. The
+          // successful attempt must reawaken the actual integer/FP consumers.
+          service.bankConflict(item.lane).poke((pending.find(_.address == item.address).contains(item)).B)
+        }
       }
       for (item <- pending if item.accepted + 3 == cycle) {
         val data = dataAt(item.address)
@@ -525,6 +543,19 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
           assert(programLoads.values.exists(_._1 == address))
           pending += Cache(lane, cycle, address, uint(req.id))
         }
+        dut.memory.retry.foreach { service =>
+          val fast = service.fast(lane)
+          if (bool(fast.valid)) {
+            val pc = uint(fast.bits.uop.pc)
+            assert(programLoads.contains(pc) && !isRejected(pc))
+            fast.bits.fullva.expect(programLoads(pc)._1.U)
+            fastRetryCounts(pc) += 1
+            assert(fastRetryCounts(pc) == 1, "Consumer load retried twice on its fast path")
+            event("consumer-fast-replay", s"\"case\":\"$label\",\"pc\":$pc,\"lane\":$lane," +
+              s"\"rob\":${uint(fast.bits.uop.robIdx.value)},\"fullva\":${uint(fast.bits.fullva)}")
+          }
+          service.queued(lane).valid.expect(false.B)
+        }
         if (bool(dut.memory.wakeup(lane)))
           event("load-predicted-wakeup", s"\"case\":\"$label\",\"lane\":$lane")
         if (bool(dut.memory.noData(lane))) { dut.memory.ld1Cancel(lane).expect(true.B); ld1 += 1 }
@@ -595,7 +626,7 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
         if (bool(port.valid)) identities.foreach { case (pc, key) =>
           if (key.rob == pointer(port.bits)) {
             assert(!isRejected(pc), s"$label: denied source or descendant retired")
-            retired += pc
+            if (replayCases) assert(retired.add(pc), "Consumer source retired twice") else retired += pc
           }
         }
       }
@@ -641,6 +672,14 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
       }
       until("consumer real LQ drain")(bool(dut.memory.queueEmpty))
       idle(20)
+      if (replayCases) {
+        val allowedLoads = if (denied) Set(BigInt(0x4000)) else programLoads.keySet
+        assert(fastRetryCounts.keySet == allowedLoads && fastRetryCounts.values.forall(_ == 1))
+        programLoads.foreach { case (pc, (address, _, _)) =>
+          val expected = if (allowedLoads(pc)) 2 else if (pc == parentPc) 1 else 0
+          assert(pending.count(_.address == address) == expected, s"Unexpected consumer attempt count at $pc")
+        }
+      }
       assert(rcWritten.contains(0x4000), "The allowed control never exercised a real RC write")
       assert(Set(BigInt(0x4008), BigInt(0x400c), BigInt(0x4010)).subsetOf(enqueueWitnesses),
         "A proposed dependent never entered its actual issue queue")
@@ -671,7 +710,7 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
 
   private case class ArchitecturalLoad(pc: BigInt, address: BigInt, data: BigInt,
     privilege: Int, virtual: Boolean, outcome: Int, faults: Set[Int],
-    lateError: Boolean = false, pmpFault: Boolean = false, mmio: Boolean = false) {
+    lateError: Boolean = false, pmpFault: Boolean = false, mmio: Boolean = false, generation: Int = 0) {
     def blocked: Boolean = outcome != 0
   }
   private case class ArchitecturalAttempt(lane: Int, accepted: Int, source: ArchitecturalLoad, id: BigInt)
@@ -680,6 +719,7 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
     val planned = mutable.Map.empty[BigInt, ArchitecturalLoad]
     val sourceKeys = mutable.Map.empty[BigInt, Key]
     private val loadOwners = mutable.Map.empty[Key, BigInt]
+    private val loadQueueOwners = mutable.Map.empty[Key, Pointer]
     private val destinationOwners = mutable.Map.empty[BigInt, BigInt]
     private val activeRobSources = mutable.Map.empty[Pointer, Set[BigInt]]
     val seenRename = mutable.Map.empty[BigInt, Key]
@@ -692,6 +732,7 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
     val watched = mutable.Set.empty[BigInt]
     val attempts = mutable.ArrayBuffer.empty[ArchitecturalAttempt]
     val redirectsSeen = mutable.ArrayBuffer.empty[(Int, BigInt, Pointer)]
+    val bpuRedirectsSeen = mutable.ArrayBuffer.empty[(Int, BigInt, Pointer)]
     val distributionSeen = mutable.ArrayBuffer.empty[(Int, Int, BigInt)]
     var hsTraps = 0
     var debugTraps = 0
@@ -701,6 +742,12 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
     var setupPc = BigInt(0x1000)
     private var rcPrevious = Vector.fill[Option[BigInt]](dut.memory.rcWrites.size)(None)
     private var expectedRead: Option[BigInt] = None
+    private val queuedRetries = mutable.Map.empty[BigInt, Int].withDefaultValue(0)
+    private var heldReplay: Option[BigInt] = None
+    private var haltAfterResident: Option[(BigInt, BigInt)] = None
+    private var haltedResident: Option[(Key, BigInt, Int)] = None
+    private val canceledReplayOwners = mutable.Set.empty[Key]
+    private val canceledControlOwners = mutable.Set.empty[Pointer]
     private def owner(key: Key): Option[BigInt] = loadOwners.get(key)
     private def oldestOrEqual(candidate: Pointer, redirect: Pointer): Boolean =
       if (candidate.flag == redirect.flag) candidate.value <= redirect.value else candidate.value > redirect.value
@@ -756,6 +803,17 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
     override def edge(): Unit = {
       dut.memory.response.foreach { response => zero(response.bits); response.valid.poke(false.B) }
       zero(dut.memory.pmp)
+      dut.memory.retry.foreach { service =>
+        service.bankConflict.foreach(_.poke(false.B))
+        service.dataInvalid.foreach(_.poke(false.B))
+        service.dataInvalidFast.foreach(_.poke(false.B))
+        for (attempt <- attempts if attempt.accepted + 1 == cycle) {
+          val source = attempt.source
+          val ordinal = attempts.filter(_.source == source).indexOf(attempt)
+          service.dataInvalidFast(attempt.lane).poke((!source.blocked && source.faults.isEmpty &&
+            (ordinal < 2 || heldReplay.contains(source.pc) && source.generation == 0)).B)
+        }
+      }
       for (attempt <- attempts if attempt.accepted + 2 == cycle) {
         val response = dut.memory.response(attempt.lane)
         val source = attempt.source
@@ -763,11 +821,39 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
         response.bits.data.poke((source.data | (source.data << 64)).U)
         dut.memory.pmp(attempt.lane).ld.poke(source.pmpFault.B)
         dut.memory.pmp(attempt.lane).mmio.poke(source.mmio.B)
+        dut.memory.retry.foreach { service =>
+          val ordinal = attempts.filter(_.source == source).indexOf(attempt)
+          service.dataInvalid(attempt.lane).poke((!source.blocked && source.faults.isEmpty &&
+            (ordinal < 2 || heldReplay.contains(source.pc) && source.generation == 0)).B)
+        }
       }
       for (attempt <- attempts if attempt.accepted + 3 == cycle) {
         val response = dut.memory.response(attempt.lane)
         response.bits.data_delayed.poke((attempt.source.data | (attempt.source.data << 64)).U)
         response.bits.error_delayed.poke(attempt.source.lateError.B)
+      }
+      haltAfterResident.foreach { case (olderPc, loadPc) =>
+        if (haltedResident.isEmpty) sourceKeys.get(loadPc).foreach { key =>
+          dut.memory.retry.get.residents.zipWithIndex.find { case (resident, _) =>
+            bool(resident.valid) && pointer(resident.bits.rob) == key.rob
+          }.foreach { case (resident, slot) =>
+            val older = seenRename(olderPc)
+            dut.io.robHead.valid.expect(true.B)
+            assert(pointer(dut.io.robHead.robIdx) == older.rob,
+              "The interruptible DIV must still precede the resident load")
+            dut.io.robHead.interruptSafe.expect(true.B)
+            dut.io.robHead.writebacked.expect(false.B)
+            assert(!finished(loadPc) && !retiredSources(loadPc))
+            assert(loadQueueOwners(key) == Pointer(bool(resident.bits.lq.flag), uint(resident.bits.lq.value)),
+              "The resident queue entry must retain the issued load's LQ identity")
+            if (enabled) resident.bits.fullva.expect(planned(loadPc).address.U)
+            haltedResident = Some((key, uint(resident.bits.lq.value), cycle))
+            dut.io.interrupts.debug.poke(true.B)
+            event("resident-replay-halt-request", s"\"case\":\"$label\",\"pc\":$loadPc," +
+              s"\"rob\":${key.rob.value},\"flag\":${key.rob.flag},\"lq\":${uint(resident.bits.lq.value)}," +
+              s"\"slot\":$slot,\"fullva\":${planned(loadPc).address},\"head_pc\":$olderPc")
+          }
+        }
       }
       if (bool(dut.io.fetchRequest.valid) && bool(dut.io.fetchReady) && !bool(dut.io.ifuRedirect.valid))
         fetches(ftqPointer(dut.io.fetchRequest.bits.ftqIdx)) = uint(dut.io.fetchRequest.bits.startAddr)
@@ -789,6 +875,10 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
         if (bool(port.valid)) {
           val pc = uint(port.bits.pc)
           val rob = pointer(port.bits.robIdx)
+          // A native rollback may reuse the same physical ROB tag. A real
+          // rename creates its next incarnation after the canceled queue drains.
+          canceledReplayOwners.filter(_.rob == rob).toSeq.foreach(canceledReplayOwners.remove)
+          canceledControlOwners -= rob
           val previous = activeRobSources.getOrElse(rob, Set.empty)
           if (previous.forall(pc => retiredSources(pc) || canceledSources(pc))) activeRobSources(rob) = Set.empty
           if (bool(port.bits.rfWen)) destinationOwners -= uint(port.bits.pdest)
@@ -844,6 +934,10 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
         redirectsSeen += ((cycle, uint(red.cfiUpdate.target), pointer(red.robIdx)))
         event("architectural-ftq-redirect", s"\"case\":\"$label\",\"target\":${uint(red.cfiUpdate.target)}")
       }
+      if (bool(dut.io.frontendRedirect.valid)) {
+        val red = dut.io.frontendRedirect.bits
+        bpuRedirectsSeen += ((cycle, uint(red.cfiUpdate.target), pointer(red.robIdx)))
+      }
       if (bool(dut.memory.distribution.w.valid)) {
         val write = dut.memory.distribution.w.bits
         distributionSeen += ((cycle, uint(write.addr).toInt, uint(write.data)))
@@ -863,6 +957,7 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
           sourceKeys(pc) = key
           loadOwners.get(key).foreach(prior => assert(finished(prior) || canceledSources(prior)))
           loadOwners(key) = pc
+          loadQueueOwners(key) = Pointer(bool(port.bits.uop.lqIdx.flag), uint(port.bits.uop.lqIdx.value))
           destinationOwners(key.destination) = pc
           assert(uint(port.bits.src(0)) + uint(port.bits.uop.imm) == source.address)
           dut.memory.sourcePrivilege.expect(source.privilege.U)
@@ -871,11 +966,46 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
             s"\"address\":${source.address},\"privilege\":${source.privilege},\"virtual\":${source.virtual}")
         }
         if (bool(dut.memory.requests(lane).valid)) {
-          assert(bool(port.valid), "The bounded architectural cases do not fabricate replay requests")
-          val source = planned(uint(port.bits.uop.pc))
+          val source = if (replayCases) {
+            val attempt = dut.memory.retry.get.attempt(lane)
+            attempt.valid.expect(true.B)
+            val pc = uint(attempt.bits.uop.pc)
+            val candidate = planned(pc)
+            val key = Key(pointer(attempt.bits.uop.robIdx), uint(attempt.bits.uop.pdest))
+            assert(sourceKeys.get(pc).contains(key) && !canceledSources(pc), "Retry lost its original architectural owner")
+            assert(loadQueueOwners(key) == Pointer(bool(attempt.bits.uop.lqIdx.flag), uint(attempt.bits.uop.lqIdx.value)),
+              "Retry lost its original LQ identity")
+            if (enabled) {
+              attempt.bits.fullva.expect(candidate.address.U)
+              attempt.bits.fdiSourcePrivilege.get.expect(candidate.privilege.U)
+              attempt.bits.fdiSourceVirtual.get.expect(candidate.virtual.B)
+            }
+            candidate
+          } else {
+            assert(bool(port.valid), "The bounded architectural cases do not fabricate replay requests")
+            planned(uint(port.bits.uop.pc))
+          }
           val req = dut.memory.requests(lane).bits
           req.vaddr.expect(source.address.U)
           attempts += ArchitecturalAttempt(lane, cycle, source, uint(req.id))
+        }
+        dut.memory.retry.foreach { service =>
+          val replay = service.queued(lane)
+          if (bool(replay.valid)) {
+            val pc = uint(replay.bits.uop.pc)
+            val source = planned(pc)
+            assert(!canceledSources(pc) && !source.blocked && source.faults.isEmpty)
+            if (enabled) {
+              replay.bits.fullva.expect(source.address.U)
+              replay.bits.fdiSourcePrivilege.get.expect(source.privilege.U)
+              replay.bits.fdiSourceVirtual.get.expect(source.virtual.B)
+            }
+            queuedRetries(pc) += 1
+            assert(heldReplay.contains(pc) || queuedRetries(pc) <= 2,
+              "Architectural load exceeded its two requested retries")
+            event("architectural-queue-replay", s"\"case\":\"$label\",\"pc\":$pc,\"lane\":$lane," +
+              s"\"rob\":${uint(replay.bits.uop.robIdx.value)},\"fullva\":${uint(replay.bits.fullva)}")
+          }
         }
         if (bool(dut.memory.permissionRequest(lane).valid)) {
           permissionRequests += 1
@@ -896,8 +1026,10 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
         val result = dut.memory.completion(lane)
         if (bool(result.valid)) {
           val key = Key(pointer(result.bits.uop.robIdx), uint(result.bits.uop.pdest))
+          assert(!canceledReplayOwners(key), "Canceled replay incarnation produced a terminal result")
           val pc = owner(key).get
           val source = planned(pc)
+          assert(!heldReplay.contains(pc), "The held load completed before its context cancellation")
           assert(!canceledSources(pc) && finished.add(pc))
           result.bits.uop.exceptionVec.zipWithIndex.foreach { case (bit, index) => bit.expect(source.faults(index).B) }
           if (source.blocked) {
@@ -912,6 +1044,8 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
             }
           } else if (source.faults.isEmpty) {
             result.bits.data.expect(source.data.U); result.bits.uop.rfWen.expect(true.B)
+            if (replayCases) assert(queuedRetries(pc) == 2 && attempts.count(_.source == source) == 3,
+              "Allowed architectural load did not complete its real queue retries")
           }
           event("architectural-load-completion", s"\"case\":\"$label\",\"pc\":$pc," +
             s"\"vector\":[${source.faults.toSeq.sorted.mkString(",")}],\"blocked\":${source.blocked}")
@@ -929,13 +1063,21 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
         destinationOwners.get(uint(port.sourceDestination))
       }.toVector
       dut.io.robRetire.foreach { port =>
-        if (bool(port.valid)) activeRobSources.getOrElse(pointer(port.bits), Set.empty).foreach { pc =>
+        if (bool(port.valid)) {
+          assert(!canceledControlOwners(pointer(port.bits)) &&
+            !canceledReplayOwners.exists(_.rob == pointer(port.bits)), "A canceled incarnation retired")
+          activeRobSources.getOrElse(pointer(port.bits), Set.empty).foreach { pc =>
             assert(robAllocatedSources(pc), "A source retired without observed ROB allocation")
             assert(!canceledSources(pc) && !planned.get(pc).exists(_.faults.nonEmpty), "Canceled or faulting source retired")
             retiredSources += pc
             retirementCounts(pc) += 1
             assert(retirementCounts(pc) == 1, "Source retired twice")
+          }
         }
+      }
+      dut.memory.wb.foreach { port =>
+        if (bool(port.fire)) assert(!canceledReplayOwners.exists(_.rob == pointer(port.rob)),
+          "Canceled replay incarnation reached the actual writeback path")
       }
       dut.memory.uncacheRequest.expect(false.B); dut.memory.splitRequest.foreach(_.expect(false.B))
       dut.clock.step(); cycle += 1
@@ -1084,7 +1226,7 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
       enterFromMachine(0, 0x5200)
       val beforeRestored = permissionRequests
       allowedLoad(0x5200, BigInt("4142434445464748", 16), 0)
-      assert(permissionRequests == beforeRestored + 1 && reasonEffects == 1)
+      assert(permissionRequests == beforeRestored + (if (replayCases) 3 else 1) && reasonEffects == 1)
       assert(traps == 2 && hsTraps == 0 && debugTraps == 0)
       dut.memory.reason.expect(2.U)
       dut.io.criticalErrorState.expect(false.B)
@@ -1102,8 +1244,120 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
       until("MPRV queue drain")(bool(dut.memory.queueEmpty))
       idle(12)
       assert(traps == 0 && hsTraps == 0 && debugTraps == 0 && reasonEffects == 0)
-      assert(permissionRequests == (if (enabled) 1 else 0) && permissionResponses == permissionRequests)
+      assert(permissionRequests == (if (enabled) { if (replayCases) 3 else 1 } else 0) && permissionResponses == permissionRequests)
       event("mprv-source-separation-complete", "\"source_privilege\":3,\"source_virtual\":false,\"data_privilege\":0,\"data_virtual\":true")
+    }
+
+    def runResidentCancellation(): Unit = {
+      require(replayCases)
+      val olderPc = BigInt(0x4000)
+      val loadPc = BigInt(0x4004)
+      val data = BigInt("6e4c2a0897b5d3f1", 16)
+      prepare(3)
+      setRegister(2, BigInt("7123456789abcdef", 16))
+      setRegister(3, 7)
+      enterFromMachine(0, olderPc)
+      watched += olderPc
+      val original = ArchitecturalLoad(loadPc, 0x8000, data, 0, false, 0, Set.empty)
+      planned(loadPc) = original
+      heldReplay = Some(loadPc)
+      haltAfterResident = Some((olderPc, loadPc))
+      val divide = (BigInt(1) << 25) | (BigInt(3) << 20) | (BigInt(2) << 15) |
+        (BigInt(5) << 12) | (BigInt(20) << 7) | 0x33
+      val beforeDebugRedirect = redirectsSeen.size
+      val beforeDebugBpu = bpuRedirectsSeen.size
+      packet(olderPc, Seq(divide, load(10, 0)), tag = true)
+      until("a real resident load is canceled by haltreq and Debug recovery") {
+        def matches(entry: (Int, BigInt, Pointer)): Boolean =
+          entry._2 == dut.debugEntryAddress && seenRename.get(olderPc).exists(_.rob == entry._3)
+        haltedResident.nonEmpty && debugTraps == 1 && bool(dut.io.debugMode) &&
+          redirectsSeen.drop(beforeDebugRedirect).exists(matches) &&
+          bpuRedirectsSeen.drop(beforeDebugBpu).exists(matches)
+      }
+      dut.io.interrupts.debug.poke(false.B)
+      haltAfterResident = None
+      until("the canceled replay and architectural load queue drain") {
+        !dut.memory.retry.get.residents.exists(entry => bool(entry.valid)) && bool(dut.memory.queueEmpty)
+      }
+      idle(12)
+      val (oldOwner, oldLq, residentCycle) = haltedResident.get
+      assert(sourceKeys(loadPc) == oldOwner && canceledSources(loadPc) && canceledSources(olderPc))
+      assert(!finished(loadPc) && !retiredSources(loadPc) && !retiredSources(olderPc))
+      assert(attempts.exists(_.source == original), "No real attempt preceded replay cancellation")
+      dut.io.dpc.expect(olderPc.U)
+      assert((uint(dut.io.dcsr) & 3) == 0 && ((uint(dut.io.dcsr) >> 6) & 7) == 3)
+      if (enabled) { dut.memory.reason.expect(7.U); assert(reasonEffects == 0) }
+      canceledReplayOwners += oldOwner
+      canceledControlOwners += seenRename(olderPc).rob
+      event("resident-replay-canceled", s"\"case\":\"$label\",\"pc\":$loadPc," +
+        s"\"old_rob\":${oldOwner.rob.value},\"old_flag\":${oldOwner.rob.flag},\"old_lq\":$oldLq," +
+        s"\"resident_cycle\":$residentCycle,\"attempts\":${attempts.count(_.source == original)},\"terminals\":0")
+
+      setupPc = dut.debugEntryAddress
+      if (enabled) {
+        val distributions = distributionSeen.size
+        configWrite(0x891, 0x8000, younger = false)
+        assert(distributionSeen.size == distributions + 1)
+        dut.memory.mirror(3).expect(0x8000.U)
+      }
+      // No state import chooses the return privilege or PC: DRET consumes the
+      // HU state and DIV PC saved by the real halt request.
+      dut.io.dpc.expect(olderPc.U)
+      val returnPc = setupPc
+      watched += returnPc
+      val returnIfu = redirectsSeen.size
+      val returnBpu = bpuRedirectsSeen.size
+      instruction(BigInt("7b200073", 16))
+      until("DRET restores HU and both native frontend recovery boundaries") {
+        def matches(entry: (Int, BigInt, Pointer)): Boolean =
+          entry._2 == olderPc && seenRename.get(returnPc).exists(_.rob == entry._3)
+        !bool(dut.io.debugMode) && uint(dut.io.mode) == 0 && !bool(dut.io.virtualMode) &&
+          redirectsSeen.drop(returnIfu).exists(matches) && bpuRedirectsSeen.drop(returnBpu).exists(matches)
+      }
+      idle(12)
+      dut.memory.sourcePrivilege.expect(0.U); dut.memory.sourceVirtual.expect(false.B)
+      heldReplay = None
+      // Retain the old attempt and cancellation log, then register a fresh
+      // instruction incarnation at the same architectural PCs after DRET.
+      for (pc <- Seq(olderPc, loadPc)) {
+        seenRename -= pc; frontendAccepted -= pc; sourceKeys -= pc
+        canceledSources -= pc; robAllocatedSources -= pc
+        activeRobSources.keys.toSeq.foreach(rob => activeRobSources(rob) = activeRobSources(rob) - pc)
+        loadOwners.keys.filter(key => loadOwners(key) == pc).toSeq.foreach(loadOwners.remove)
+        destinationOwners.keys.filter(dest => destinationOwners(dest) == pc).toSeq.foreach(destinationOwners.remove)
+        queuedRetries(pc) = 0
+      }
+      val resumed = ArchitecturalLoad(loadPc, 0x8000, data, 0, false,
+        if (enabled) 1 else 0, if (enabled) Set(24) else Set.empty, generation = 1)
+      planned(loadPc) = resumed
+      val beforePermission = permissionRequests
+      val beforeTrapRedirect = redirectsSeen.size
+      packet(olderPc, Seq(divide, load(10, 0)), tag = true)
+      if (enabled) {
+        until("the resumed load observes the handler's changed bounds") {
+          finished(loadPc) && traps == 1 && redirectsSeen.drop(beforeTrapRedirect).exists(entry =>
+            entry._2 == 0x6000 && sourceKeys.get(loadPc).exists(_.rob == entry._3))
+        }
+        dut.io.mcause.expect(24.U); dut.io.mepc.expect(loadPc.U); dut.io.mtval.expect(0x8000.U)
+        dut.memory.reason.expect(2.U)
+        assert(reasonEffects == 1 && !retiredSources(loadPc))
+      } else {
+        until("the resumed ordinary load completes and retires after its retries") {
+          finished(loadPc) && retiredSources(loadPc)
+        }
+        assert(traps == 0 && reasonEffects == 0)
+      }
+      until("the resumed queues drain")(bool(dut.memory.queueEmpty) &&
+        !dut.memory.retry.get.residents.exists(entry => bool(entry.valid)))
+      idle(20)
+      val expectedAttempts = if (enabled) 1 else 3
+      assert(attempts.count(_.source == resumed) == expectedAttempts)
+      assert(permissionRequests - beforePermission == (if (enabled) expectedAttempts else 0))
+      assert(permissionResponses == permissionRequests && retiredSources(olderPc) && retirementCounts(olderPc) == 1)
+      assert(debugTraps == 1 && hsTraps == 0)
+      event("resident-replay-recovery-complete", s"\"case\":\"$label\",\"pc\":$loadPc," +
+        s"\"same_pc\":true,\"same_address\":true,\"debug_entries\":$debugTraps," +
+        s"\"resumed_attempts\":$expectedAttempts,\"resumed_denied\":$enabled,\"queue_empty\":true")
     }
   }
 
@@ -1574,7 +1828,7 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
     utility.ChiselDB.init(options.EnableChiselDB && !options.FPGAPlatform)
     val workspace = new Workspace(path.resolve("compiled").toString)
     workspace.reset()
-    val module = workspace.elaborateGeneratedModule(() => new FDILoadPermissionBackendHarness)
+    val module = workspace.elaborateGeneratedModule(() => new FDILoadPermissionBackendHarness(replayServices = replayCases))
     workspace.generateAdditionalSources()
     val common = CommonCompilationSettings(availableParallelism =
       CommonCompilationSettings.AvailableParallelism.UpTo(Runtime.getRuntime.availableProcessors()))
@@ -1584,7 +1838,30 @@ class FDILoadPermissionBackendTest extends AnyFlatSpec {
     simulation.runElaboratedModule(module) { elaborated =>
       val driver = new Driver(elaborated.wrapped)
       try {
-        if (scenario == "full") {
+        if (scenario == "replay") {
+          var cases = 0
+          for (floating <- Seq(false, true); denied <- (if (enabled) Seq(false, true) else Seq(false))) {
+            val consumer = new ConsumerDriver(elaborated.wrapped, floating, denied)
+            try consumer.runConsumers()
+            finally driver.events ++= consumer.events
+            cases += 1
+          }
+          if (enabled) {
+            val recovery = new ArchitecturalDriver(elaborated.wrapped, "replay-configuration-recovery")
+            try recovery.runRecovery()
+            finally driver.events ++= recovery.events
+            cases += 1
+          }
+          val mprv = new ArchitecturalDriver(elaborated.wrapped, "replay-mprv-source-separation")
+          try mprv.runMprv()
+          finally driver.events ++= mprv.events
+          cases += 1
+          val interrupted = new ArchitecturalDriver(elaborated.wrapped, "resident-replay-debug-recovery")
+          try interrupted.runResidentCancellation()
+          finally driver.events ++= interrupted.events
+          cases += 1
+          println(s"L02_BACKEND_REPLAY_PASS enabled=$enabled cases=$cases actual_consumers=true actual_csr=true actual_replay=true")
+        } else if (scenario == "full") {
           for (floating <- Seq(false, true); denied <- Seq(false, true)) {
             val consumer = new ConsumerDriver(elaborated.wrapped, floating, denied)
             try consumer.runConsumers()

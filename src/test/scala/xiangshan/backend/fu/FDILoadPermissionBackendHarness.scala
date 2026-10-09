@@ -39,7 +39,7 @@ class FDILoadConsumerPhase(implicit p: Parameters) extends XSBundle {
 
 // Real load and queue instances replace the inherited idle memory inputs.
 // Every observation below reads production state; no tap drives it back.
-class FDILoadPermissionBackendHarness(implicit p: Parameters) extends UserTimerDeliveryHarness {
+class FDILoadPermissionBackendHarness(val replayServices: Boolean = false)(implicit p: Parameters) extends UserTimerDeliveryHarness {
   val loads = Seq.fill(backendParams.LduCnt)(withReset(reset.asAsyncReset) { Module(new LoadUnit) })
   val queue = withReset(reset.asAsyncReset) { Module(new LoadQueue) }
   private val tlbWidth = backendParams.LduCnt + backendParams.HyuCnt + 1
@@ -90,6 +90,21 @@ class FDILoadPermissionBackendHarness(implicit p: Parameters) extends UserTimerD
     val cacheReady = Input(Vec(loads.size, Bool()))
     val response = Input(Vec(loads.size, Valid(new DCacheWordResp)))
     val pmp = Input(Vec(loads.size, new PMPRespBundle))
+    // Optional public service controls exercise retries without forcing queue state.
+    // The original L01 fixture retains exactly its default service connections.
+    val retry = Option.when(replayServices)(new Bundle {
+      val bankConflict = Input(Vec(loads.size, Bool()))
+      val dataInvalid = Input(Vec(loads.size, Bool()))
+      val dataInvalidFast = Input(Vec(loads.size, Bool()))
+      val attempt = Output(Vec(loads.size, Valid(new LsPipelineBundle)))
+      val queued = Output(Vec(loads.size, Valid(new LsPipelineBundle)))
+      val fast = Output(Vec(loads.size, Valid(new LqWriteBundle)))
+      val residents = Output(Vec(LoadQueueReplaySize, Valid(new Bundle {
+        val rob = new RobPtr
+        val lq = new LqPtr
+        val fullva = UInt(XLEN.W)
+      })))
+    })
     val requests = Output(Vec(loads.size, Valid(new DCacheWordReq)))
     val issue = Output(Vec(loads.size, Valid(new MemExuInput)))
     val completion = Output(Vec(loads.size, Valid(new MemExuOutput)))
@@ -193,6 +208,14 @@ class FDILoadPermissionBackendHarness(implicit p: Parameters) extends UserTimerD
   loads.foreach(load => idleInputs(load.io))
   idleInputs(queue.io)
   idleInputs(tlb.io)
+  memory.retry.foreach { service =>
+    service.residents.zipWithIndex.foreach { case (resident, index) =>
+      resident.valid := observe(queue.loadQueueReplay.allocated(index))
+      resident.bits.rob := observe(queue.loadQueueReplay.uop(index).robIdx)
+      resident.bits.lq := observe(queue.loadQueueReplay.uop(index).lqIdx)
+      resident.bits.fullva := (if (HasFDI) observe(queue.loadQueueReplay.fdiFullva.get(index)) else 0.U)
+    }
+  }
   // ROB, dispatch and Mem consume this original redirect. The later frontend
   // export can normalize its level and is only a recovery-target observation.
   memory.executionRedirect := backend.io.mem.redirect
@@ -315,6 +338,17 @@ class FDILoadPermissionBackendHarness(implicit p: Parameters) extends UserTimerD
     load.io.dcache.resp.bits := memory.response(lane).bits
     load.io.dcache.s2_hit := !memory.response(lane).bits.miss
     load.io.dcache.s2_first_hit := !memory.response(lane).bits.miss
+    memory.retry.foreach { service =>
+      load.io.dcache.s2_bank_conflict := service.bankConflict(lane)
+      load.io.lsq.forward.dataInvalid := service.dataInvalid(lane)
+      load.io.lsq.forward.dataInvalidFast := service.dataInvalidFast(lane)
+      service.attempt(lane).valid := load.io.dcache.req.fire
+      service.attempt(lane).bits := observe(load.s0_out)
+      service.queued(lane).valid := load.io.replay.fire
+      service.queued(lane).bits := load.io.replay.bits
+      service.fast(lane).valid := load.io.fast_rep_out.fire
+      service.fast(lane).bits := load.io.fast_rep_out.bits
+    }
     load.io.fast_rep_in <> load.io.fast_rep_out
     load.io.replay <> queue.io.replay(lane)
     load.io.lsq.ldin <> queue.io.ldu.ldin(lane)

@@ -1,0 +1,59 @@
+{
+  "test_sources": [
+    "src/test/scala/xiangshan/mem/FDILoadReplayHarness.scala",
+    "src/test/scala/xiangshan/mem/FDILoadReplayTest.scala",
+    "src/test/scala/xiangshan/mem/FDILoadReplayMissHarness.scala",
+    "src/test/scala/xiangshan/mem/FDILoadReplayMissTest.scala",
+    "src/test/scala/xiangshan/backend/fu/FDILoadPermissionBackendHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/FDILoadReplayBackendTest.scala",
+    "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/FDILoadPermissionBackendTest.scala"
+  ],
+  "suites": {
+    "local": {
+      "class": "xiangshan.mem.FDILoadReplayTest",
+      "expected_cases": [
+        [
+          "xiangshan.mem.FDILoadReplayTest",
+          "Ordinary scalar retries across production load lanes should retain transaction identity and complete each surviving load exactly once"
+        ]
+      ],
+      "scope": "Actual LoadUnit and load replay queue identity, stalls and cancellation; no whole-core or physical timing claim",
+      "sources": [
+        "src/test/scala/xiangshan/mem/FDILoadReplayHarness.scala",
+        "src/test/scala/xiangshan/mem/FDILoadReplayTest.scala"
+      ]
+    },
+    "miss": {
+      "class": "xiangshan.mem.FDILoadReplayMissTest",
+      "expected_cases": [
+        [
+          "xiangshan.mem.FDILoadReplayMissTest",
+          "FDI load replay through real miss grants should preserve permission and transaction identity through grants, forwarding and cancellation"
+        ]
+      ],
+      "scope": "Actual cache miss grant and forwarding lifecycle with external coherent responses; no complete cache coherence or physical timing claim",
+      "sources": [
+        "src/test/scala/xiangshan/mem/FDILoadReplayMissHarness.scala",
+        "src/test/scala/xiangshan/mem/FDILoadReplayMissTest.scala",
+        "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala"
+      ]
+    },
+    "backend": {
+      "class": "xiangshan.backend.fu.FDILoadReplayBackendTest",
+      "expected_cases": [
+        [
+          "xiangshan.backend.fu.FDILoadReplayBackendTest",
+          "Load permission with real scheduling, data bypass and precise trap completion should block denied data while preserving the actual ROB exception completion"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDILoadPermissionBackendHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDILoadPermissionBackendTest.scala",
+        "src/test/scala/xiangshan/backend/fu/FDILoadReplayBackendTest.scala"
+      ],
+      "scope": "Actual Backend, scheduling, load replay and precise completion; no complete-core or physical timing claim"
+    }
+  }
+}

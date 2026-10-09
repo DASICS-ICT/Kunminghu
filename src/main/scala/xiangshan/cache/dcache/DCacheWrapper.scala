@@ -697,6 +697,8 @@ class DcacheToLduForwardIO(implicit p: Parameters) extends DCacheBundle {
                 req_paddr(log2Up(refillBytes)) === last
     val forward_D = RegInit(false.B)
     val forwardData = RegInit(VecInit(List.fill(VLEN/8)(0.U(8.W))))
+    // Keep the error bit with the matched data across the S1-to-S2 forwarding cycle.
+    val forwardCorrupt = RegEnable(corrupt, false.B, all_match)
 
     val block_idx = req_paddr(log2Up(refillBytes) - 1, 3)
     val block_data = Wire(Vec(l1BusDataWidth / 64, UInt(64.W)))
@@ -713,7 +715,7 @@ class DcacheToLduForwardIO(implicit p: Parameters) extends DCacheBundle {
       }
     }
 
-    (forward_D, forwardData, corrupt)
+    (forward_D, forwardData, forwardCorrupt)
   }
 }
 

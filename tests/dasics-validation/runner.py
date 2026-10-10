@@ -348,7 +348,7 @@ def main(task_directory):
     parser.add_argument("--mill-heap", default="16G")
     parser.add_argument("--test-heap", default="40G")
     parser.add_argument("--test-stack", default="256m")
-    parser.add_argument("--control-tasks", default="f02")
+    parser.add_argument("--control-tasks", default="f02,f03")
     parser.add_argument("--scenario", choices=profile.get("scenarios", ()), default=profile.get("default_scenario"),
                         help="Explicit L04 misaligned-load scenario")
     args = parser.parse_args()
@@ -365,8 +365,8 @@ def main(task_directory):
     if not 1 <= args.jobs <= 44:
         parser.error("The approved total host concurrency limit is 44")
     tasks = args.control_tasks.split(",")
-    if not tasks or len(tasks) != len(set(tasks)) or not set(tasks).issubset({"f02"}):
-        parser.error("--control-tasks must be a distinct comma-separated list of f02")
+    if not tasks or len(tasks) != len(set(tasks)) or not set(tasks).issubset({"f02", "f03"}):
+        parser.error("--control-tasks must be a distinct comma-separated list of f02,f03")
     if args.action == "prepare":
         if not args.baseline or args.overlay_manifest is None:
             parser.error("prepare requires --baseline and --overlay-manifest")

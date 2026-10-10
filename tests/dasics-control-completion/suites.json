@@ -4,6 +4,7 @@
     "src/test/scala/xiangshan/backend/fu/FDIFullControlHarness.scala",
     "src/test/scala/xiangshan/backend/fu/FDIFullControlDriver.scala",
     "src/test/scala/xiangshan/backend/fu/F02ControlPrograms.scala",
+    "src/test/scala/xiangshan/backend/fu/FDIFullJumpPrograms.scala",
     "src/test/scala/xiangshan/backend/fu/FDIFullControlBackendTest.scala",
     "src/test/scala/xiangshan/frontend/FDITrustMetadataFrontendHarness.scala",
     "src/test/scala/xiangshan/frontend/FDITrustMetadataFrontendTest.scala",
@@ -25,6 +26,7 @@
         "src/test/scala/xiangshan/backend/fu/FDIFullControlHarness.scala",
         "src/test/scala/xiangshan/backend/fu/FDIFullControlDriver.scala",
         "src/test/scala/xiangshan/backend/fu/F02ControlPrograms.scala",
+        "src/test/scala/xiangshan/backend/fu/FDIFullJumpPrograms.scala",
         "src/test/scala/xiangshan/backend/fu/FDIFullControlBackendTest.scala"
       ],
       "scope": "Actual Backend call/jump/branch completion; selected task cases share one native model per feature state; no whole-core fetch system or physical timing claim"

@@ -16,8 +16,8 @@ class FDIFullControlBackendTest extends AnyFlatSpec {
     val root = Paths.get(sys.env("FDI_CONTROL_RUN_ROOT")).toRealPath()
     require(Paths.get("").toRealPath() == root, "Run from the dedicated evidence directory")
     val enabled = sys.env.getOrElse("FDI_CONTROL_ENABLED", "true").toBoolean
-    val tasks = sys.env.getOrElse("FDI_CONTROL_TASKS", "f02,f03").split(",").toSeq
-    require(tasks.nonEmpty && tasks.distinct.size == tasks.size && tasks.forall(Set("f02", "f03")))
+    val tasks = sys.env.getOrElse("FDI_CONTROL_TASKS", "f02,f03,f04").split(",").toSeq
+    require(tasks.nonEmpty && tasks.distinct.size == tasks.size && tasks.forall(Set("f02", "f03", "f04")))
     implicit val p: Parameters = UserTimerDeliveryParameters(enabled)
     val options = p(xiangshan.DebugOptionsKey)
     utility.Constantin.init(options.EnableConstantin && !options.FPGAPlatform)
@@ -42,6 +42,7 @@ class FDIFullControlBackendTest extends AnyFlatSpec {
           task match {
             case "f02" => F02ControlPrograms.run(driver)
             case "f03" => F03ControlPrograms.run(driver)
+            case "f04" => F04ControlPrograms.run(driver)
           }
         } catch { case failure: Throwable => error = Some(failure); throw failure }
         finally driver.finish(error)

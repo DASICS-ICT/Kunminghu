@@ -135,5 +135,7 @@ class FDITrustMetadataFrontendHarness(implicit p: Parameters) extends XSModule {
 
   require(ifu.io.fdiConfig.isDefined == HasFDI)
   require(ifu.io.toIbuffer.bits.fdiNotTrusted.isDefined == HasFDI)
+  require(ifu.io.toIbuffer.bits.fdiRawRVC.isDefined == HasFDI)
   require(ibuffer.io.out.forall(_.bits.fdiNotTrusted.isDefined == HasFDI))
+  require(ibuffer.io.out.forall(_.bits.fdiRawRVC.isDefined == HasFDI))
 }

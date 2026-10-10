@@ -252,6 +252,8 @@ class FDIFrontendConfig(implicit p: Parameters) extends XSBundle {
 
 class FetchToIBuffer(implicit p: Parameters) extends XSBundle {
   val instrs           = Vec(PredictWidth, UInt(32.W))
+  // Original RVC bits share each expanded instruction's valid/enqEnable selection.
+  val fdiRawRVC        = Option.when(HasFDI)(Vec(PredictWidth, UInt(16.W)))
   val valid            = UInt(PredictWidth.W)
   val enqEnable        = UInt(PredictWidth.W)
   val pd               = Vec(PredictWidth, new PreDecodeInfo)

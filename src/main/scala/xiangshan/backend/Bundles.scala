@@ -42,6 +42,8 @@ object Bundles {
   // frontend -> backend
   class StaticInst(implicit p: Parameters) extends XSBundle {
     val instr            = UInt(32.W)
+    // Expanded instr remains the decoder input; preserve original RVC bits separately.
+    val fdiRawRVC        = Option.when(HasFDI)(UInt(16.W))
     val pc               = UInt(VAddrBits.W)
     // Source-instruction trust is valid only with the enclosing transaction.
     val fdiNotTrusted    = Option.when(HasFDI)(Bool())
@@ -59,6 +61,7 @@ object Bundles {
 
     def connectCtrlFlow(source: CtrlFlow): Unit = {
       this.instr            := source.instr
+      this.fdiRawRVC.foreach(_ := source.fdiRawRVC.get)
       this.pc               := source.pc
       this.fdiNotTrusted.foreach(_ := source.fdiNotTrusted.get)
       this.foldpc           := source.foldpc
@@ -80,6 +83,7 @@ object Bundles {
     def numSrc = backendParams.numSrc
     // passed from StaticInst
     val instr           = UInt(32.W)
+    val fdiRawRVC       = Option.when(HasFDI)(UInt(16.W))
     val pc              = UInt(VAddrBits.W)
     // Every split uop retains its parent instruction's sampled trust result.
     val fdiNotTrusted   = Option.when(HasFDI)(Bool())
@@ -177,6 +181,8 @@ object Bundles {
     def numSrc          = backendParams.numSrc
     // passed from StaticInst
     val instr           = UInt(32.W)
+    // Rename and IQ payload transfers keep these bits with their original instruction.
+    val fdiRawRVC       = Option.when(HasFDI)(UInt(16.W))
     val pc              = UInt(VAddrBits.W)
     // Trust remains per instruction when ROB compression rewrites FTQ metadata.
     val fdiNotTrusted   = Option.when(HasFDI)(Bool())
@@ -618,6 +624,8 @@ object Bundles {
     val robIdx        = new RobPtr
     // The selected issue transaction owns this tag through stalls and retries.
     val fdiNotTrusted = Option.when(HasFDI)(Bool())
+    // Original instruction encoding follows the same issue/OG control transaction.
+    val fdiInstr = Option.when(HasFDI && (params.hasJmpFu || params.hasBrhFu))(UInt(32.W))
     val iqIdx         = UInt(log2Up(MemIQSizeMax).W)// Only used by store yet
     val isFirstIssue  = Bool()                      // Only used by store yet
     val pdestCopy  = OptionWrapper(copyWakeupOut, Vec(copyNum, UInt(params.wbPregIdxWidth.W)))
@@ -673,6 +681,7 @@ object Bundles {
       this.imm           := source.common.imm
       this.robIdx        := source.common.robIdx
       this.fdiNotTrusted.foreach(_ := source.common.fdiNotTrusted.get)
+      this.fdiInstr.foreach(_ := source.common.fdiInstr.get)
       this.pdest         := source.common.pdest
       this.isFirstIssue  := source.common.isFirstIssue // Only used by mem debug log
       this.iqIdx         := source.common.iqIdx        // Only used by mem feedback
@@ -726,6 +735,8 @@ object Bundles {
     val vxsat        = if (params.writeVxsat)   Some(Bool())                  else None
     val exceptionVec = if (params.exceptionOut.nonEmpty) Some(ExceptionVec()) else None
     val fdiException = Option.when(HasFDI && params.exceptionOut.nonEmpty)(new FDIExceptionRecord)
+    // Valid only for a dynamic illegal instruction from this writeback transaction.
+    val fdiTrapInst = Option.when(HasFDI && (params.hasJmpFu || params.hasBrhFu))(Valid(UInt(32.W)))
     val flushPipe    = if (params.flushPipe)    Some(Bool())                  else None
     val replay       = if (params.replayInst)   Some(Bool())                  else None
     val lqIdx        = if (params.hasLoadFu)    Some(new LqPtr())             else None
@@ -879,6 +890,8 @@ object Bundles {
     val commitType = CommitType()
     val exceptionVec = ExceptionVec()
     val fdiException = Option.when(HasFDI)(new FDIExceptionRecord)
+    // Selected and registered with the same precise ROB exception as exceptionVec.
+    val fdiTrapInst = Option.when(HasFDI)(Valid(UInt(32.W)))
     val isPcBkpt = Bool()
     val isFetchMalAddr = Bool()
     val gpaddr = UInt(XLEN.W)

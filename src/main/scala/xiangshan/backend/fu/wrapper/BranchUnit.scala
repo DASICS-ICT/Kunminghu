@@ -101,6 +101,8 @@ class BranchUnit(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg) {
     io.out.bits.ctrl.exceptionVec.get := FDIExceptionRecord.exceptionVector(
       deniedTarget, io.fdiSource.get.sourcePrivilege, io.fdiSource.get.sourceVirtual)
     io.out.bits.ctrl.exceptionVec.get(ExceptionNO.illegalInstr) := illegalTarget
+    io.out.bits.ctrl.fdiTrapInst.get.valid := illegalTarget
+    io.out.bits.ctrl.fdiTrapInst.get.bits := io.in.bits.ctrl.fdiInstr.get
     io.out.bits.ctrl.fdiException.get.tval := Mux(deniedTarget, addModule.io.target, 0.U)
     io.out.bits.ctrl.fdiException.get.reason := Mux(deniedTarget, 4.U, 0.U)
   }

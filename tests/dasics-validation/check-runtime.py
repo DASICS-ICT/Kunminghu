@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 
-PROFILES = ("dasics-load-replay",)
+PROFILES = ("dasics-load-replay", "dasics-control-completion")
 ENVIRONMENT_KEYS = (
     "DASICS_RUN_ROOT", "DASICS_JOBS", "DASICS_TEST_HEAP", "DASICS_TEST_STACK",
     "L01_FDI_ENABLED", "FDI_CONTROL_ENABLED", "FDI_CONTROL_RUN_ROOT", "FDI_CONTROL_TASKS",

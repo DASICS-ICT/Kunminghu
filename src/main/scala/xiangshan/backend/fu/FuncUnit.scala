@@ -21,6 +21,8 @@ class FuncUnitCtrlInput(cfg: FuConfig)(implicit p: Parameters) extends XSBundle 
   val robIdx      = new RobPtr
   // Source trust follows this input's validity and control pipeline.
   val fdiNotTrusted = Option.when(HasFDI)(Bool())
+  // Original encoding is held and canceled with this instruction's control pipeline.
+  val fdiInstr = Option.when(HasFDI && (cfg.isJmp || cfg.isBrh))(UInt(32.W))
   val pdest       = UInt(PhyRegIdxWidth.W)
   val rfWen       = OptionWrapper(cfg.needIntWen, Bool())
   val fpWen       = OptionWrapper(cfg.needFpWen,  Bool())
@@ -49,6 +51,8 @@ class FuncUnitCtrlOutput(cfg: FuConfig)(implicit p: Parameters) extends XSBundle
   val vlWen         = OptionWrapper(cfg.needVlWen, Bool())
   val exceptionVec  = OptionWrapper(cfg.exceptionOut.nonEmpty, ExceptionVec())
   val fdiException  = Option.when(HasFDI && cfg.exceptionOut.nonEmpty)(new FDIExceptionRecord)
+  // The writeback exception owns this encoding; no independent capture queue is used.
+  val fdiTrapInst = Option.when(HasFDI && (cfg.isJmp || cfg.isBrh))(Valid(UInt(32.W)))
   val flushPipe     = OptionWrapper(cfg.flushPipe,  Bool())
   val replay        = OptionWrapper(cfg.replayInst, Bool())
   val preDecode     = OptionWrapper(cfg.hasPredecode, new PreDecodeInfo)
@@ -117,6 +121,7 @@ abstract class FuncUnit(val cfg: FuConfig)(implicit p: Parameters) extends XSMod
   val io = IO(new FuncUnitIO(cfg))
   // Fault producers override this payload together with their exception vector.
   io.out.bits.ctrl.fdiException.foreach(record => record := 0.U.asTypeOf(record))
+  io.out.bits.ctrl.fdiTrapInst.foreach(record => record := 0.U.asTypeOf(record))
   if (cfg.isJmp || cfg.isBrh) {
     io.out.bits.ctrl.exceptionVec.foreach(_ := ExceptionVec(false.B))
   }

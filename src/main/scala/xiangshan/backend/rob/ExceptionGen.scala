@@ -50,6 +50,10 @@ class ExceptionGen(params: BackendParams)(implicit p: Parameters) extends XSModu
     if (HasFDI) {
       xiangshan.backend.FDIExceptionRecord.check(candidate.valid,
         candidate.bits.exceptionVec, candidate.bits.fdiException.get)
+      when(candidate.valid && candidate.bits.fdiTrapInst.get.valid) {
+        assert(candidate.bits.exceptionVec(ExceptionNO.illegalInstr),
+          "A dynamic trap instruction must belong to an illegal-instruction exception")
+      }
     } else {
       when(candidate.valid) {
         assert(!xiangshan.backend.FDIExceptionRecord.pending(candidate.bits.exceptionVec),
@@ -149,6 +153,9 @@ class ExceptionGen(params: BackendParams)(implicit p: Parameters) extends XSModu
         current.exceptionVec := Mux(isVecUpdate, s1_out_bits.exceptionVec, current.exceptionVec)
         current.fdiException.foreach { record =>
           record := Mux(isVecUpdate, s1_out_bits.fdiException.get, record)
+        }
+        current.fdiTrapInst.foreach { record =>
+          record := Mux(isVecUpdate, s1_out_bits.fdiTrapInst.get, record)
         }
         current.hasException := Mux(isVecUpdate, s1_out_bits.hasException, current.hasException)
         current.flushPipe := (s1_out_bits.flushPipe || current.flushPipe) && !s1_out_bits.exceptionVec.asUInt.orR

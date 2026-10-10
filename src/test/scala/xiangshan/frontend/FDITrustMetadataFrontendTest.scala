@@ -46,8 +46,14 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
   }
   private case class Instruction(pc: BigInt, word: BigInt, bytes: Int,
     exception: Int = 0, crossPage: Boolean = false, backendException: Boolean = false) {
-    // The compressed image deliberately uses only C.NOP, whose expansion is architectural.
-    def decoded: BigInt = if (bytes == 2) { require(word == 1); BigInt(0x13) } else word
+    // Literal architectural expansions are independent of the production
+    // RVCExpander. Opposite C.ADDI immediates distinguish neighboring raw words.
+    def decoded: BigInt = if (bytes == 2) word.toInt match {
+      case 0x0001 => BigInt(0x00000013) // C.NOP
+      case 0x0285 => BigInt(0x00128293) // C.ADDI x5, +1
+      case 0x12fd => BigInt("fff28293", 16) // C.ADDI x5, -1
+      case other => throw new IllegalArgumentException(s"No independent expansion for 0x${other.toHexString}")
+    } else word
   }
   private case class Mmio(physical: BigInt, translated: BigInt = 0x92000,
     tlbException: Int = 0, pmpFault: Boolean = false, responseDelay: Int = 2)
@@ -86,6 +92,13 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     var enqueueWraps = 0
     var dequeueWraps = 0
     var cancellations = 0
+    var rawFetchChecks = 0
+    var rawDecodeChecks = 0
+    var rawBypassPackets = 0
+    var rawStoredPackets = 0
+    var rawHeldFetchCycles = 0
+    var rawHeldDecodeCycles = 0
+    val rawCompressedWords = mutable.Set.empty[BigInt]
     val events = mutable.ArrayBuffer.empty[String]
     val cases = mutable.ArrayBuffer.empty[String]
     private var context = Context(3)
@@ -279,6 +292,10 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
         value.isLastInFtqEntry(slot).expect((instruction == fetch.instructions.last).B)
         val tag = enabled && fetch.context.get.notTrusted(instruction.pc)
         value.fdiNotTrusted.foreach(_(slot).expect(tag.B))
+        value.fdiRawRVC.foreach { raw =>
+          raw(slot).expect((instruction.word & 0xffff).U)
+          rawFetchChecks += 1
+        }
       }
     }
 
@@ -303,6 +320,10 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
       value.trigger.expect(TriggerAction.None)
       value.isLastInFtqEntry.expect((instruction == item.fetch.instructions.last).B)
       value.fdiNotTrusted.foreach(_.expect(item.tag.B))
+      value.fdiRawRVC.foreach { raw =>
+        raw.expect((instruction.word & 0xffff).U)
+        rawDecodeChecks += 1
+      }
     }
 
     def edge(): Unit = {
@@ -357,9 +378,15 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
           fetch.received = cycles
           packets += 1
           if (bool(dut.io.ibufferState.bypass)) bypassPackets += 1 else storedPackets += 1
+          if (enabled && fetch.instructions.exists(_.bytes == 2)) {
+            if (bool(dut.io.ibufferState.bypass)) rawBypassPackets += 1 else rawStoredPackets += 1
+          }
           event("ifu-ibuffer", fetch, s"\"instructions\":${fetch.instructions.size}," +
             s"\"bypass\":${bool(dut.io.ibufferState.bypass)}")
-        } else if (!bool(dut.io.fetchReady)) heldFetchCycles += 1
+        } else if (!bool(dut.io.fetchReady)) {
+          heldFetchCycles += 1
+          if (enabled && fetch.instructions.exists(_.bytes == 2)) rawHeldFetchCycles += 1
+        }
       }
       if (!flushingBuffer && !bool(dut.io.ftq.redirect.valid)) {
         val validOutputs = dut.io.decode.filter(lane => bool(lane.valid))
@@ -369,12 +396,17 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
           val item = expected.dequeue()
           delivered += 1
           item.fetch.consumed += 1
+          if (enabled && item.instruction.bytes == 2) rawCompressedWords += item.instruction.word
           event("ibuffer-consume", item.fetch,
             s"\"pc\":${item.instruction.pc},\"instruction\":${item.instruction.decoded}," +
+              s"\"raw_instruction\":${item.instruction.word},\"expected_raw16\":${item.instruction.word & 0xffff}," +
               s"\"not_trusted\":${item.tag},\"exception\":${item.instruction.exception}," +
               s"\"cross_page\":${item.instruction.crossPage}")
         }
-        if (validOutputs.nonEmpty && !bool(dut.io.decodeCanAccept)) heldDecodeCycles += 1
+        if (validOutputs.nonEmpty && !bool(dut.io.decodeCanAccept)) {
+          heldDecodeCycles += 1
+          if (enabled && expected.take(validOutputs.size).exists(_.instruction.bytes == 2)) rawHeldDecodeCycles += 1
+        }
       }
       if (bool(dut.io.uncache.toUncache.valid) && bool(dut.io.uncache.toUncache.ready)) {
         val fetch = activeMmio.getOrElse(throw new AssertionError("Unowned Uncache request"))
@@ -579,6 +611,20 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     }
     def rvi(start: BigInt): Fetch = packet(start,
       (0 until 8).map(i => Instruction(start + 4 * i, FDITrustInstructionImage.addi(5, i + 1), 4)), start + 32)
+    val rawWords = Seq(BigInt(0x0001), BigInt(0x0285), BigInt(0x12fd))
+    def rawMixed(start: BigInt, salt: Int = 0): Fetch = {
+      var pc = start
+      val instructions = (0 until 8).map { index =>
+        val compressed = index % 2 == 0
+        val size = if (compressed) 2 else 4
+        val word = if (compressed) rawWords((index / 2 + salt) % rawWords.size)
+          else FDITrustInstructionImage.addi(index + 6, index + 1)
+        val instruction = Instruction(pc, word, size)
+        pc += size
+        instruction
+      }
+      packet(start, instructions, pc)
+    }
     def deliver(fetch: Fetch): Unit = {
       val goal = driver.delivered + fetch.instructions.size
       driver.enqueue(fetch)
@@ -625,7 +671,8 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     val mixedStart = BigInt(0x10f8)
     var mixedPC = mixedStart
     val mixed = Seq(2, 4, 2, 4, 4, 2, 4, 2, 4, 4).zipWithIndex.map { case (size, index) =>
-      val item = Instruction(mixedPC, if (size == 2) BigInt(1) else FDITrustInstructionImage.addi(6, index + 1), size)
+      val item = Instruction(mixedPC, if (size == 2) rawWords(index % rawWords.size)
+        else FDITrustInstructionImage.addi(6, index + 1), size)
       mixedPC += size
       item
     }
@@ -635,12 +682,20 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     driver.mark("rvc-every-slot-and-halfword-window-endpoints")
     val rvcStart = BigInt(0x1200)
     driver.configure(Context(0, uEnable = true, uLo = rvcStart + 8, uHi = rvcStart + 20))
-    deliver(packet(rvcStart, (0 until 16).map(i => Instruction(rvcStart + 2 * i, 1, 2)), rvcStart + 32))
+    deliver(packet(rvcStart, (0 until 16).map(i => Instruction(rvcStart + 2 * i, rawWords(i % rawWords.size), 2)),
+      rvcStart + 32))
+    driver.mark("raw-rvc-rvi-empty-buffer-bypass")
+    val rawBypassBefore = driver.rawBypassPackets
+    val bypassBefore = driver.bypassPackets
+    deliver(rawMixed(0x1300, salt = 1))
+    assert(driver.bypassPackets > bypassBefore)
+    if (enabled) assert(driver.rawBypassPackets > rawBypassBefore)
     for (slot <- 0 until 15) {
       driver.mark(s"rvi-start-slot-$slot")
       val start = BigInt(0x1400) + slot * 64
       val instructions = (0 until 16).filter(_ != slot + 1).map { index =>
-        Instruction(start + 2 * index, if (index == slot) FDITrustInstructionImage.addi(2, slot + 1) else BigInt(1),
+        Instruction(start + 2 * index, if (index == slot) FDITrustInstructionImage.addi(2, slot + 1)
+          else rawWords(index % rawWords.size),
           if (index == slot) 4 else 2)
       }
       driver.configure(Context(1, sEnable = true, sLo = start + 2 * slot, sHi = start + 2 * slot + 2))
@@ -649,9 +704,9 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
 
     driver.mark("last-half-rvi-original-start-and-next-packet-mask")
     val halfStart = BigInt(0x2fe0)
-    val first = (0 until 15).map(i => Instruction(halfStart + 2 * i, 1, 2)) :+
+    val first = (0 until 15).map(i => Instruction(halfStart + 2 * i, rawWords(i % rawWords.size), 2)) :+
       Instruction(halfStart + 30, FDITrustInstructionImage.addi(1, 1), 4)
-    val second = (1 until 16).map(i => Instruction(halfStart + 32 + 2 * i, 1, 2))
+    val second = (1 until 16).map(i => Instruction(halfStart + 32 + 2 * i, rawWords((i + 1) % rawWords.size), 2))
     val halfImage = FDITrustInstructionImage.bytes((first ++ second).map(i => (i.pc, i.word, i.bytes)))
     val firstFetch = packet(halfStart, first, halfStart + 32, halfImage)
     val secondFetch = packet(halfStart + 32, second, halfStart + 64, halfImage)
@@ -670,7 +725,8 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     driver.waitFor(halfKill.received >= 0)
     driver.redirect(halfKill)
     val afterHalfStart = BigInt(0x32000)
-    deliver(packet(afterHalfStart, (0 until 16).map(i => Instruction(afterHalfStart + 2 * i, 1, 2)),
+    deliver(packet(afterHalfStart, (0 until 16).map(i => Instruction(afterHalfStart + 2 * i,
+      rawWords((i + 2) % rawWords.size), 2)),
       afterHalfStart + 32))
 
     driver.mark("request-backpressure-and-f2-config-capture")
@@ -699,8 +755,9 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     driver.mark("partial-output-fill-and-compaction")
     driver.consume(false)
     val shortStart = BigInt(0x6800)
-    val shortA = packet(shortStart, (0 until 3).map(i => Instruction(shortStart + 2 * i, 1, 2)), shortStart + 6)
-    val shortB = packet(shortStart + 6, (0 until 2).map(i => Instruction(shortStart + 6 + 2 * i, 1, 2)), shortStart + 10)
+    val shortA = packet(shortStart, (0 until 3).map(i => Instruction(shortStart + 2 * i, rawWords(i), 2)), shortStart + 6)
+    val shortB = packet(shortStart + 6, (0 until 2).map(i => Instruction(shortStart + 6 + 2 * i,
+      rawWords(2 - i), 2)), shortStart + 10)
     val shortGoal = driver.delivered + 5
     driver.configure(Context(1, sEnable = true, sLo = shortStart, sHi = shortStart + 6))
     driver.enqueue(shortA)
@@ -717,7 +774,7 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
       val held = mutable.ArrayBuffer.empty[Fetch]
       var index = 0
       while (!driver.full && index < dut.IBufSize / 8 + 4) {
-        val fetch = rvi(base + index * 64)
+        val fetch = rawMixed(base + index * 64, salt = index)
         held += fetch
         driver.enqueue(fetch)
         driver.waitFor(fetch.received >= 0)
@@ -726,7 +783,7 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
       }
       assert(driver.full)
       for (_ <- 0 until 2) {
-        val fetch = rvi(base + index * 64)
+        val fetch = rawMixed(base + index * 64, salt = index)
         held += fetch
         driver.enqueue(fetch)
         index += 1
@@ -756,7 +813,7 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     val wrapGoal = driver.delivered + (dut.IBufSize / 8 * 3 + 4) * 8
     for (index <- 0 until dut.IBufSize / 8 * 3 + 4) {
       driver.configure(if (index % 2 == 0) Context(3) else Context(1, sEnable = true))
-      driver.enqueue(rvi(0xa000 + index * 64))
+      driver.enqueue(rawMixed(0xa000 + index * 64, salt = index))
     }
     driver.drain(wrapGoal)
     assert(driver.enqueueWraps - enqueueWrapsBefore >= 2 && driver.dequeueWraps - dequeueWrapsBefore >= 2)
@@ -768,7 +825,7 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     driver.redirect(cancelled.head)
     assert(driver.delivered == beforeCancel && cancelled.forall(_.cancelled))
     driver.configure(Context(3))
-    deliver(rvi(0xe000))
+    deliver(rawMixed(0xe000, salt = 2))
 
     for (stage2 <- Seq(true, false)) {
       driver.mark(s"bpu-stage-${if (stage2) 2 else 3}-f0-cancel")
@@ -779,17 +836,17 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
 
     driver.mark("reset-clears-pending-f2")
     driver.cacheHold = true
-    val resetF2 = rvi(0xe100)
+    val resetF2 = rawMixed(0xe100)
     driver.enqueue(resetF2)
     driver.waitFor(driver.f2Valid)
     driver.reset()
     assert(resetF2.cancelled && resetF2.sampled < 0)
-    deliver(rvi(0xe200))
+    deliver(rawMixed(0xe200, salt = 1))
     driver.mark("reset-clears-buffered-output-and-held-f3")
     val resetBuffered = fillHeld(0x33000)
     driver.reset()
     assert(resetBuffered.forall(f => f.cancelled && f.consumed == 0))
-    deliver(rvi(0xe400))
+    deliver(rawMixed(0xe400, salt = 2))
 
     for (exception <- 1 to 3) {
       driver.mark(s"cache-cross-page-exception-$exception")
@@ -812,14 +869,17 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
 
     def mmioCase(name: String, start: BigInt, compressed: Boolean = false,
       tlbException: Int = 0, pmpFault: Boolean = false, waitPrevious: Boolean = false,
-      retainedRedirect: Boolean = false): Unit = {
+      retainedRedirect: Boolean = false, compressedWord: BigInt = 0x0285): Unit = {
       driver.mark(name)
       val crossing = (start & 7) == 6 && !compressed
       val fault = if (tlbException != 0) tlbException else if (pmpFault) 3 else 0
-      val word = if (compressed) BigInt(1) else if (fault != 0) BigInt(0x93) else BigInt(0x00100093)
+      val word = if (compressed) compressedWord else if (fault != 0) BigInt(0x93) else BigInt(0x00100093)
       val instruction = Instruction(start, word, if (compressed) 2 else 4,
         exception = fault, crossPage = crossing && fault != 0)
-      val fetch = packet(start, Seq(instruction), start + 32,
+      // Cache bytes are irrelevant for an MMIO fetch. Distinct placeholders
+      // require both decoded and raw metadata to come from Uncache assembly.
+      val cacheImage = FDITrustInstructionImage.bytes(Seq((start, BigInt(0x00000013), 4)))
+      val fetch = packet(start, Seq(instruction), start + 32, image = cacheImage,
         mmio = Some(Mmio(start + 0x80000, tlbException = tlbException, pmpFault = pmpFault)))
       driver.configure(Context(1, sEnable = true, sLo = start, sHi = start + 2))
       driver.previousCommit(!waitPrevious)
@@ -850,6 +910,7 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     }
     mmioCase("mmio-rvi-previous-and-own-commit-gates", 0x20000, waitPrevious = true)
     mmioCase("mmio-rvc-original-tag", 0x20040, compressed = true)
+    mmioCase("mmio-rvc-negative-halfword-boundary", 0x20046, compressed = true, compressedWord = 0x12fd)
     mmioCase("mmio-preserved-same-owner-flush-after", 0x20080, waitPrevious = true, retainedRedirect = true)
     mmioCase("mmio-page-end-resend-original-owner", 0x21ffe)
     mmioCase("mmio-page-end-tlb-pf", 0x23ffe, tlbException = 1)
@@ -866,11 +927,17 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
     assert(resetMmio.uncacheResponses == 0 && resetMmio.received < 0)
     driver.reset()
     assert(resetMmio.cancelled)
-    deliver(rvi(0x2a000))
+    deliver(rawMixed(0x2a000, salt = 1))
     assert(driver.heldFetchCycles > 0 && driver.heldDecodeCycles > 0)
     assert(driver.bypassPackets > 0 && driver.storedPackets > 0 && driver.cancellations > 0)
+    if (enabled) {
+      assert(driver.rawFetchChecks > 0 && driver.rawDecodeChecks > 0)
+      assert(driver.rawCompressedWords == rawWords.toSet)
+      assert(driver.rawBypassPackets > 0 && driver.rawStoredPackets > 0)
+      assert(driver.rawHeldFetchCycles > 0 && driver.rawHeldDecodeCycles > 0)
+    }
     assert(driver.pending == 0)
-    assert(driver.cases.size == 57)
+    assert(driver.cases.size == 59)
   }
 
   it should "carry independently classified raw instructions through the production IFU and IBuffer" in {
@@ -907,6 +974,10 @@ class FDITrustMetadataFrontendTest extends AnyFlatSpec with ChiselScalatestTeste
           s"fetchHeld=${driver.heldFetchCycles} decodeHeld=${driver.heldDecodeCycles} " +
           s"bypass=${driver.bypassPackets} stored=${driver.storedPackets} " +
           s"enqWraps=${driver.enqueueWraps} deqWraps=${driver.dequeueWraps} cancelled=${driver.cancellations} " +
+          s"rawFetchChecks=${driver.rawFetchChecks} rawDecodeChecks=${driver.rawDecodeChecks} " +
+          s"rawBypass=${driver.rawBypassPackets} rawStored=${driver.rawStoredPackets} " +
+          s"rawFetchHeld=${driver.rawHeldFetchCycles} rawDecodeHeld=${driver.rawHeldDecodeCycles} " +
+          s"rawWords=${driver.rawCompressedWords.toSeq.sorted.mkString(",")} " +
           "ifu=production ibuffer=production cache=external-protocol-fixture")
       } finally {
         Files.write(root.resolve("frontend-events.jsonl"), driver.events.mkString("", "\n", "\n").getBytes(StandardCharsets.UTF_8))

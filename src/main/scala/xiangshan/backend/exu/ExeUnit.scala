@@ -255,6 +255,7 @@ class ExeUnitImp(
       sink.bits.ctrl.fuOpType    := source.bits.fuOpType
       sink.bits.ctrl.robIdx      := source.bits.robIdx
       sink.bits.ctrl.fdiNotTrusted.foreach(_ := source.bits.fdiNotTrusted.get)
+      sink.bits.ctrl.fdiInstr.foreach(_ := source.bits.fdiInstr.get)
       sink.bits.ctrl.pdest       := source.bits.pdest
       sink.bits.ctrl.rfWen       .foreach(x => x := source.bits.rfWen.get)
       sink.bits.ctrl.fpWen       .foreach(x => x := source.bits.fpWen.get)
@@ -283,6 +284,7 @@ class ExeUnitImp(
       sink.fuOpType := source.fuOpType
       sink.robIdx := source.robIdx
       sink.fdiNotTrusted.foreach(_ := source.fdiNotTrusted.get)
+      sink.fdiInstr.foreach(_ := source.fdiInstr.get)
       sink.pdest := source.pdest
       sink.rfWen.foreach(x => x := source.rfWen.get)
       sink.fpWen.foreach(x => x := source.fpWen.get)
@@ -390,6 +392,9 @@ class ExeUnitImp(
   io.out.bits.exceptionVec.foreach(x => x := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.exceptionVec.getOrElse(0.U.asTypeOf(io.out.bits.exceptionVec.get)))))
   io.out.bits.fdiException.foreach { record =>
     record := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.fdiException.getOrElse(0.U.asTypeOf(record))))
+  }
+  io.out.bits.fdiTrapInst.foreach { record =>
+    record := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.fdiTrapInst.getOrElse(0.U.asTypeOf(record))))
   }
   io.out.bits.flushPipe.foreach(x => x := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.flushPipe.getOrElse(0.U.asTypeOf(io.out.bits.flushPipe.get)))))
   io.out.bits.replay.foreach(x => x := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.replay.getOrElse(0.U.asTypeOf(io.out.bits.replay.get)))))

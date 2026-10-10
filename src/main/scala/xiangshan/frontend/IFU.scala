@@ -948,6 +948,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   /*** send to Ibuffer  ***/
   io.toIbuffer.valid          := f3_toIbuffer_valid
   io.toIbuffer.bits.instrs    := f3_expd_instr
+  io.toIbuffer.bits.fdiRawRVC.foreach(_ := VecInit(f3_instr.map(_(15, 0))))
   io.toIbuffer.bits.valid     := f3_instr_valid.asUInt
   io.toIbuffer.bits.enqEnable := checkerOutStage1.fixedRange.asUInt & f3_instr_valid.asUInt
   io.toIbuffer.bits.pd        := f3_pd
@@ -1047,6 +1048,8 @@ class NewIFU(implicit p: Parameters) extends XSModule
     val brOffset                         = br_offset(inst, mmio_is_RVC)
 
     io.toIbuffer.bits.instrs(0) := Mux(mmioRVCExpander.io.ill, mmioRVCExpander.io.in, mmioRVCExpander.io.out.bits)
+    // Use the same completed MMIO assembly as the expander, including resend.
+    io.toIbuffer.bits.fdiRawRVC.foreach(_(0) := inst(15, 0))
 
     io.toIbuffer.bits.pd(0).valid  := true.B
     io.toIbuffer.bits.pd(0).isRVC  := mmio_is_RVC

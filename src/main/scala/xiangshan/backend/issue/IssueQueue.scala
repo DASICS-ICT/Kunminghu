@@ -776,6 +776,10 @@ class IssueQueueImp(override val wrapper: IssueQueue)(implicit p: Parameters, va
     deq.bits.common.pdest := deqEntryVec(i).bits.payload.pdest
     deq.bits.common.robIdx := deqEntryVec(i).bits.status.robIdx
     deq.bits.common.fdiNotTrusted.foreach(_ := deqEntryVec(i).bits.payload.fdiNotTrusted.get)
+    deq.bits.common.fdiInstr.foreach { instr =>
+      val payload = deqEntryVec(i).bits.payload
+      instr := Mux(payload.preDecodeInfo.isRVC, payload.fdiRawRVC.get, payload.instr)
+    }
 
     require(deq.bits.common.dataSources.size <= finalDataSources(i).size)
     deq.bits.common.dataSources.zip(finalDataSources(i)).foreach { case (sink, source) => sink := source}

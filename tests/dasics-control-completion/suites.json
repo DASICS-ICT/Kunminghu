@@ -1,0 +1,76 @@
+{
+  "test_sources": [
+    "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/FDIFullControlHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/FDIFullControlDriver.scala",
+    "src/test/scala/xiangshan/backend/fu/F02ControlPrograms.scala",
+    "src/test/scala/xiangshan/backend/fu/FDIFullControlBackendTest.scala",
+    "src/test/scala/xiangshan/frontend/FDITrustMetadataFrontendHarness.scala",
+    "src/test/scala/xiangshan/frontend/FDITrustMetadataFrontendTest.scala",
+    "src/test/scala/xiangshan/backend/fu/InterruptFilterAlignmentHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/InterruptFilterAlignmentTest.scala",
+    "src/test/scala/xiangshan/backend/fu/FDIFullControlTimingEmitTest.scala"
+  ],
+  "suites": {
+    "control": {
+      "class": "xiangshan.backend.fu.FDIFullControlBackendTest",
+      "expected_cases": [
+        [
+          "xiangshan.backend.fu.FDIFullControlBackendTest",
+          "DASICS production control-flow completion should preserve precise call and target effects through the real Backend"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDIFullControlHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDIFullControlDriver.scala",
+        "src/test/scala/xiangshan/backend/fu/F02ControlPrograms.scala",
+        "src/test/scala/xiangshan/backend/fu/FDIFullControlBackendTest.scala"
+      ],
+      "scope": "Actual Backend call/jump/branch completion; selected task cases share one native model per feature state; no whole-core fetch system or physical timing claim"
+    },
+    "frontend": {
+      "class": "xiangshan.frontend.FDITrustMetadataFrontendTest",
+      "expected_cases": [
+        [
+          "xiangshan.frontend.FDITrustMetadataFrontendTest",
+          "FDI trust metadata in the real frontend should carry independently classified raw instructions through the production IFU and IBuffer"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/frontend/FDITrustMetadataFrontendHarness.scala",
+        "src/test/scala/xiangshan/frontend/FDITrustMetadataFrontendTest.scala"
+      ],
+      "scope": "Actual IFU and IBuffer raw compressed instruction transport in the full frontend scenario; no Backend retirement or whole-core fetch-system acceptance"
+    },
+    "timing-emit": {
+      "class": "xiangshan.backend.fu.FDIFullControlTimingEmitTest",
+      "expected_cases": [
+        [
+          "xiangshan.backend.fu.FDIFullControlTimingEmitTest",
+          "DASICS Backend synthesis view should emit the production Backend with verification-only removal"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDIFullControlHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDIFullControlTimingEmitTest.scala"
+      ],
+      "scope": "Same frozen production Backend fixture and parameters, emitted through the standard remove-assert transform for synthesis only; no simulation, physical timing or functional pass claim"
+    },
+    "interrupt": {
+      "class": "xiangshan.backend.fu.InterruptFilterAlignmentTest",
+      "expected_cases": [
+        [
+          "xiangshan.backend.fu.InterruptFilterAlignmentTest",
+          "InterruptFilter sampled M and HS selection should align sampled validity and cause while preserving candidate priority and cancellation"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/backend/fu/InterruptFilterAlignmentHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/InterruptFilterAlignmentTest.scala"
+      ],
+      "scope": "Real InterruptFilter M/HS sampled validity and cause, six-stage candidate pipeline, immediate HU blocking and public claim/kill controls; no VS arbitration redesign, IMSIC external priority, CSR ownership or ROB acceptance proof"
+    }
+  }
+}

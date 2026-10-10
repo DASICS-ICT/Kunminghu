@@ -144,6 +144,8 @@ class CfiUpdateInfo(implicit p: Parameters) extends XSBundle with HasBPUParamete
 // Dequeue DecodeWidth insts from Ibuffer
 class CtrlFlow(implicit p: Parameters) extends XSBundle {
   val instr = UInt(32.W)
+  // Only pd.isRVC selects these original bits for a later execution-time II.
+  val fdiRawRVC = Option.when(HasFDI)(UInt(16.W))
   val pc = UInt(VAddrBits.W)
   // Source trust is captured for this instruction and follows its existing validity.
   val fdiNotTrusted = Option.when(HasFDI)(Bool())

@@ -53,13 +53,15 @@ class InterruptFilter(hasFDI: Boolean = false) extends Module {
   private val hsip = hip.asUInt | sip.asUInt
   private val hsie = hie.asUInt | sie.asUInt
 
-  val mtopiIsNotZero: Bool = (mip & mie & (~mideleg).asUInt) =/= 0.U
-  val stopiIsNotZero: Bool = (hsip & hsie & (~hideleg).asUInt) =/= 0.U
-
   val NoSEIMask = (~(BigInt(1) << InterruptNO.SEI).U(64.W)).asUInt
   val mtopigather = mip & mie & (~mideleg).asUInt
   val hstopigather = hsip & hsie & (~hideleg).asUInt
   val vstopigather = vsip & vsie & NoSEIMask
+
+  // TOPI validity belongs to the same sampled source set as the registered
+  // priority winner. Reset validity without adding reset to its payload.
+  val mtopiIsNotZero: Bool = RegNext(mtopigather.orR, false.B)
+  val stopiIsNotZero: Bool = RegNext(hstopigather.orR, false.B)
 
   val flag = RegInit(false.B)
   when (platformValid) {
@@ -446,14 +448,16 @@ class InterruptFilter(hasFDI: Boolean = false) extends Module {
     )
   )
 
+  val mIRModeCond = privState.isModeM && mstatusMIE || privState < PrivState.ModeM
+  val hsIRModeCond = privState.isModeHS && sstatusSIE || privState < PrivState.ModeHS
   val mIRVecTmp = Mux(
-    privState.isModeM && mstatusMIE || privState < PrivState.ModeM,
+    mIRModeCond,
     io.out.mtopi.IID.asUInt,
     0.U
   )
 
   val hsIRVecTmp = Mux(
-    privState.isModeHS && sstatusSIE || privState < PrivState.ModeHS,
+    hsIRModeCond,
     io.out.stopi.IID.asUInt,
     0.U
   )
@@ -528,9 +532,15 @@ class InterruptFilter(hasFDI: Boolean = false) extends Module {
     // Critical recovery keeps its CETRIG/non-Debug qualification, but bypasses
     // the ordinary haltreq STEP mask. Its descriptor owns no other IRQ source.
     val criticalSelected = io.in.criticalDebug.get && io.in.dcsr.CETRIG.asBool && !io.in.debugMode
-    val higherPending = criticalSelected || intrVec.orR || enableDebugIntr || (vsIRModeCond && SelectCandidate5)
+    val higherReady = criticalSelected || intrVec.orR || enableDebugIntr || (vsIRModeCond && SelectCandidate5)
+    // A newly pending M/HS source revokes HU before its sorted IID is ready,
+    // but cannot create an ordinary descriptor until that payload is valid.
+    // Keep ready events in the blocker when their live source has just cleared.
+    val immediateNormalPending = !disableAllIntr && !io.in.nmi &&
+      ((mIRModeCond && mtopigather.orR) || (hsIRModeCond && hstopigather.orR))
+    val higherPending = higherReady || immediateNormalPending
     val huSelected = io.in.huCandidate.get && !higherPending && !io.in.huCandidateKill.get
-    raw.valid := higherPending || huSelected
+    raw.valid := higherReady || huSelected
     raw.bits.cause := Mux(criticalSelected, 0.U, Mux(huSelected, 4.U, intrVec))
     raw.bits.debug := criticalSelected || enableDebugIntr
     raw.bits.criticalDebug := criticalSelected

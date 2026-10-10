@@ -152,6 +152,15 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
       in.bits.redirectFlush := redirectFlush
   }
   csrMod.io.trapInst := trapInstMod.io.currentTrapInst
+  if (HasFDI) {
+    // The final ROB exception owns this encoding, including its cancellation and
+    // age selection. Decode/CSR II and VI retain the existing TrapInstMod path.
+    val dynamicII = csrIn.exception.valid && !csrIn.exception.bits.isInterrupt &&
+      csrIn.exception.bits.exceptionVec(EX_II) && csrIn.exception.bits.fdiTrapInst.get.valid
+    when(dynamicII) {
+      csrMod.io.trapInst := csrIn.exception.bits.fdiTrapInst.get
+    }
+  }
   csrMod.io.fdiCallReturnPC.foreach(_ := io.fdiCallReturnPCIn.get)
   csrMod.io.fetchMalTval := trapTvalMod.io.tval
   csrMod.io.fromMem.excpVA  := csrIn.memExceptionVAddr

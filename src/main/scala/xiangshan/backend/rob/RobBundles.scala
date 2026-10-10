@@ -293,6 +293,8 @@ class RobExceptionInfo(implicit p: Parameters) extends XSBundle {
   val isEnqExcp = Bool()
   val exceptionVec = ExceptionVec()
   val fdiException = Option.when(HasFDI)(new xiangshan.backend.FDIExceptionRecord)
+  // Carries a dynamic II encoding through the same age selection as exceptionVec.
+  val fdiTrapInst = Option.when(HasFDI)(Valid(UInt(32.W)))
   val isFetchMalAddr = Bool()
   val flushPipe = Bool()
   val isVset = Bool()

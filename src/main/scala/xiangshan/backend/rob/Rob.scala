@@ -682,6 +682,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.exception.bits.fdiException.foreach { record =>
     record := RegEnable(exceptionDataRead.bits.fdiException.get, exceptionHappen)
   }
+  io.exception.bits.fdiTrapInst.foreach { record =>
+    record := RegEnable(exceptionDataRead.bits.fdiTrapInst.get, exceptionHappen)
+  }
   // fetch trigger fire or execute ebreak
   io.exception.bits.isPcBkpt := RegEnable(
     exceptionDataRead.bits.exceptionVec(ExceptionNO.EX_BP) && (
@@ -1250,6 +1253,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     exceptionGen.io.enq(i).bits.ftqOffset := io.enq.req(i).bits.ftqOffset
     exceptionGen.io.enq(i).bits.exceptionVec := ExceptionNO.selectFrontend(io.enq.req(i).bits.exceptionVec)
     exceptionGen.io.enq(i).bits.fdiException.foreach(record => record := 0.U.asTypeOf(record))
+    exceptionGen.io.enq(i).bits.fdiTrapInst.foreach(record => record := 0.U.asTypeOf(record))
     exceptionGen.io.enq(i).bits.hasException := io.enq.req(i).bits.hasException
     exceptionGen.io.enq(i).bits.isEnqExcp := io.enq.req(i).bits.hasException
     exceptionGen.io.enq(i).bits.isFetchMalAddr := io.enq.req(i).bits.isFetchMalAddr
@@ -1287,6 +1291,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     exc_wb.bits.ftqOffset       := 0.U.asTypeOf(exc_wb.bits.ftqOffset)
     exc_wb.bits.exceptionVec    := wb.bits.exceptionVec.get
     exc_wb.bits.fdiException.foreach(_ := wb.bits.fdiException.get)
+    exc_wb.bits.fdiTrapInst.foreach { record =>
+      record := wb.bits.fdiTrapInst.getOrElse(0.U.asTypeOf(record))
+    }
     exc_wb.bits.hasException    := wb.bits.exceptionVec.get.asUInt.orR // Todo: use io.writebackNeedFlush(i) instead
     exc_wb.bits.isEnqExcp       := false.B
     exc_wb.bits.isFetchMalAddr  := false.B

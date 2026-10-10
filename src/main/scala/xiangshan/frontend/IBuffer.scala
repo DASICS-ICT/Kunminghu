@@ -50,6 +50,8 @@ class IBufferIO(implicit p: Parameters) extends XSBundle {
 
 class IBufEntry(implicit p: Parameters) extends XSBundle {
   val inst             = UInt(32.W)
+  // Retain pre-expansion bits through the same bank and output-buffer transfers.
+  val fdiRawRVC        = Option.when(HasFDI)(UInt(16.W))
   val pc               = UInt(VAddrBits.W)
   val fdiNotTrusted    = Option.when(HasFDI)(Bool())
   val foldpc           = UInt(MemPredPCWidth.W)
@@ -65,6 +67,7 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
 
   def fromFetch(fetch: FetchToIBuffer, i: Int): IBufEntry = {
     inst       := fetch.instrs(i)
+    fdiRawRVC.foreach(_ := fetch.fdiRawRVC.get(i))
     pc         := fetch.pc(i)
     fdiNotTrusted.foreach(_ := fetch.fdiNotTrusted.get(i))
     foldpc     := fetch.foldpc(i)
@@ -87,6 +90,7 @@ class IBufEntry(implicit p: Parameters) extends XSBundle {
   def toCtrlFlow: CtrlFlow = {
     val cf = Wire(new CtrlFlow)
     cf.instr                             := inst
+    cf.fdiRawRVC.foreach(_ := fdiRawRVC.get)
     cf.pc                                := pc
     cf.fdiNotTrusted.foreach(_ := fdiNotTrusted.get)
     cf.foldpc                            := foldpc

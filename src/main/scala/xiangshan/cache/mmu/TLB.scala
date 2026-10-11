@@ -194,14 +194,14 @@ class TLB(Width: Int, nRespDups: Int = 1, Block: Seq[Boolean], q: TLBParameters)
     val effectiveInput = req(i).bits.fullvaKind === TlbFullvaKind.Effective
     val completeHostScalar = req(i).bits.fullvaKind === TlbFullvaKind.Scalar &&
       !ifetch && !virt_in && !req(i).bits.hyperinst && !req(i).bits.isPrefetch &&
-      !req(i).bits.no_translate && req(i).bits.cmd === TlbCmd.read
+      !req(i).bits.no_translate && (req(i).bits.cmd === TlbCmd.read || req(i).bits.cmd === TlbCmd.write)
     // A split offset is applied after the original PMM normalization, never before another mask.
     when (effectiveInput) { EffectiveVa(i) := req(i).bits.fullva }
     responseFullva(i) := EffectiveVa(i)
     if (!HasFDI) {
       // An ordinary scalar queue retry already passed its initial full-address prefault check.
       // Keep raw VPN and GPaddr inputs unchanged; only restore its returned host representation.
-      when (completeHostScalar && !req(i).bits.checkfullva) {
+      when (completeHostScalar && req(i).bits.cmd === TlbCmd.read && !req(i).bits.checkfullva) {
         responseFullva(i) := Mux(prevmEnable(i),
           Mux(Sv48Enable, SignExt(EffectiveVa(i)(47, 0), XLEN), SignExt(EffectiveVa(i)(38, 0), XLEN)),
           ZeroExt(EffectiveVa(i)(PAddrBits - 1, 0), XLEN))

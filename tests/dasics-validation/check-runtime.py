@@ -13,7 +13,7 @@ import subprocess
 import sys
 
 
-PROFILES = ("dasics-load-replay", "dasics-control-completion", "dasics-load-misalign")
+PROFILES = ("dasics-load-replay", "dasics-control-completion", "dasics-load-misalign", "dasics-store-misalign")
 ENVIRONMENT_KEYS = (
     "DASICS_RUN_ROOT", "DASICS_JOBS", "DASICS_TEST_HEAP", "DASICS_TEST_STACK",
     "L01_FDI_ENABLED", "FDI_CONTROL_ENABLED", "FDI_CONTROL_RUN_ROOT", "FDI_CONTROL_TASKS",
@@ -121,11 +121,19 @@ def main():
                     "L01_FDI_ENABLED": enabled, "FDI_CONTROL_ENABLED": enabled,
                     "FDI_CONTROL_RUN_ROOT": str(attempt), "FDI_CONTROL_TASKS": tasks,
                     "L04_FDI_ENABLED": enabled, "L04_SCENARIO": scenario,
+                    "L05_FDI_ENABLED": enabled, "L05_SCENARIO": scenario,
                     "NOOP_HOME": str(attempt), "BUILD_DIR": str(attempt / "build"), "TMPDIR": str(attempt / "tmp"),
                     "GIT_CEILING_DIRECTORIES": str(attempt), "LC_ALL": "C", "TZ": "UTC",
                 }
-                properties = ["prop:l04.runRoot"] if profile == "dasics-load-misalign" else ["prop:l01.runRoot", "prop:f02.runRoot"]
+                properties = (["prop:l05.runRoot"] if profile == "dasics-store-misalign" else
+                              ["prop:l04.runRoot"] if profile == "dasics-load-misalign" else
+                              ["prop:l01.runRoot", "prop:f02.runRoot"])
                 environment_keys = list(ENVIRONMENT_KEYS)
+                if profile == "dasics-store-misalign":
+                    environment_keys = [
+                        "DASICS_RUN_ROOT", "DASICS_JOBS", "DASICS_TEST_HEAP", "DASICS_TEST_STACK",
+                        "L05_FDI_ENABLED", "L05_SCENARIO", "NOOP_HOME", "BUILD_DIR", "TMPDIR", "MAKEFLAGS",
+                    ]
                 if profile == "dasics-control-completion":
                     settings.update(C08_FDI_ENABLED=enabled, C08_FRONTEND_SCENARIO="minimal" if index == 1 else "full")
                     properties.append("prop:c08.runRoot")

@@ -29,6 +29,7 @@ import xiangshan.backend.fu.fpu.FPU
 import xiangshan.backend.rob.RobLsqIO
 import xiangshan.backend.rob.RobPtr
 import xiangshan.backend.Bundles._
+import xiangshan.backend.FDIExceptionRecord
 import xiangshan.backend.fu.FuConfig.StaCfg
 import xiangshan.backend.fu.FuType.isVStore
 import xiangshan.mem.Bundles._
@@ -96,7 +97,7 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
   val io = IO(new Bundle() {
     val redirect        = Flipped(Valid(new Redirect))
-    val enq             = Vec(enqPortNum, Flipped(new MisalignBufferEnqIO))
+    val enq             = Vec(enqPortNum, Flipped(new StoreMisalignBufferEnqIO))
     val rob             = Flipped(new RobLsqIO)
     val splitStoreReq   = Decoupled(new LsPipelineBundle)
     val splitStoreResp  = Flipped(Valid(new SqWriteBundle))
@@ -136,7 +137,7 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
   //  - s_resp:  Responds to a split store access request
   //  - s_wb:    writeback yo rob/vecMergeBuffer
   //  - s_block: Wait for this instr to reach the head of Rob.
-  val s_idle :: s_split :: s_req :: s_resp :: s_wb :: s_block :: Nil = Enum(6)
+  val s_idle :: s_split :: s_req :: s_resp :: s_wb :: s_block :: s_terminal_req :: s_terminal_resp :: Nil = Enum(8)
   val bufferState    = RegInit(s_idle)
 
   // enqueue
@@ -159,7 +160,7 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
 
   // Both empty-slot and replacement acceptance own the next-cycle port revoke.
   val s2_canEnq = GatedRegNext(canEnq || cross4KBPageEnq)
-  val s2_reqSelPort = GatedRegNext(reqSelPort)
+  val s2_reqSelPort = RegEnable(reqSelPort, canEnq || cross4KBPageEnq)
   val misalign_can_split = Wire(Bool())
   misalign_can_split := Mux(s2_canEnq, (0 until enqPortNum).map {
     case i => !io.enq(i).revoke && s2_reqSelPort === i.U
@@ -183,6 +184,20 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
     } .otherwise {
       req := req
       cross4KBPageEnq := false.B
+    }
+  }
+
+  if (HasFDI) {
+    val deferred = Mux1H((0 until enqPortNum).map(i =>
+      (s2_reqSelPort === i.U) -> io.enq(i).deferToProbe.get))
+    when (s2_canEnq && req_valid && !cross4KBPageEnq &&
+      !req.uop.robIdx.needFlush(io.redirect) && deferred) {
+      // The accepted S1 owner supplies the address and source; S2 contributes only its decision.
+      req.fdiStoreProbe.get := true.B
+      req.uop.exceptionVec := FDIExceptionRecord.exceptionVector(true.B,
+        req.fdiSourcePrivilege.get, req.fdiSourceVirtual.get)
+      req.uop.fdiException.get.tval := req.fullva
+      req.uop.fdiException.get.reason := 3.U
     }
   }
 
@@ -217,9 +232,33 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
   val globalMMIO = RegInit(false.B)
   val globalNC   = RegInit(false.B)
 
-  val hasException = io.splitStoreResp.bits.vecActive && !io.splitStoreResp.bits.need_rep &&
-    ExceptionNO.selectByFu(io.splitStoreResp.bits.uop.exceptionVec, StaCfg).asUInt.orR || TriggerAction.isDmode(io.splitStoreResp.bits.uop.trigger)
+  val probeOwner = if (HasFDI) req.fdiStoreProbe.get else false.B
+  // Final SQ metadata is retained until the terminal has traversed the native STA path.
+  val terminalFullva = Reg(UInt(XLEN.W))
+  val terminalVaNeedExt = Reg(Bool())
+  val terminalGpaddr = Reg(UInt(XLEN.W))
+  val terminalIsHyper = Reg(Bool())
+  val terminalVSnonLeaf = Reg(Bool())
+  val responseOwner = io.splitStoreResp.valid && req_valid &&
+    io.splitStoreResp.bits.uop.robIdx === req.uop.robIdx &&
+    io.splitStoreResp.bits.uop.sqIdx === req.uop.sqIdx &&
+    io.splitStoreResp.bits.uop.uopIdx === req.uop.uopIdx && !req.uop.robIdx.needFlush(io.redirect)
+  val probeResponse = responseOwner && bufferState === s_resp && probeOwner &&
+    io.splitStoreResp.bits.isFinalSplit && !io.splitStoreResp.bits.hasException
+  val terminalResponse = responseOwner && bufferState === s_terminal_resp &&
+    io.splitStoreResp.bits.isFrmMisAlignBuf && io.splitStoreResp.bits.hasException
+  when (terminalResponse) {
+    assert(io.splitStoreResp.bits.fullva === terminalFullva &&
+      io.splitStoreResp.bits.vaNeedExt === terminalVaNeedExt &&
+      io.splitStoreResp.bits.uop.exceptionVec.asUInt === exceptionVec.asUInt,
+      "The terminal acknowledgment must retain its selected exception and address")
+  }
+
+  val hasStandardException = io.splitStoreResp.bits.vecActive && !io.splitStoreResp.bits.need_rep &&
+    ExceptionNO.selectByFu(io.splitStoreResp.bits.uop.exceptionVec, StaCfg).asUInt.orR
+  val hasException = hasStandardException || TriggerAction.isDmode(io.splitStoreResp.bits.uop.trigger)
   val isUncache = (io.splitStoreResp.bits.mmio || io.splitStoreResp.bits.nc) && !io.splitStoreResp.bits.need_rep
+  val scalarUncache = isUncache && !req.isvec && !LSUOpType.isHsv(req.uop.fuOpType)
 
   io.sqControl.toStoreQueue.crossPageWithHit := io.sqControl.toStoreMisalignBuffer.sqPtr === req.uop.sqIdx && isCrossPage
   io.sqControl.toStoreQueue.crossPageCanDeq := !isCrossPage || bufferState === s_block
@@ -256,9 +295,21 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
     is (s_resp) {
       val needDelay = WireInit(false.B)
 
-      when (io.splitStoreResp.valid) {
+      when (Mux(probeOwner, probeResponse, io.splitStoreResp.valid)) {
         val clearOh = UIntToOH(curPtr)
-        when (hasException || isUncache) {
+        when (probeOwner) {
+          when (hasException || isUncache || !io.splitStoreResp.bits.need_rep) {
+            bufferState := s_terminal_req
+            globalException := true.B
+            globalUncache := false.B
+          }.otherwise { bufferState := s_req }
+        }.elsewhen (scalarUncache) {
+          bufferState := s_terminal_req
+          globalException := true.B
+          globalUncache := false.B
+          globalMMIO := io.splitStoreResp.bits.mmio
+          globalNC := io.splitStoreResp.bits.nc
+        }.elsewhen (hasException || isUncache) {
           // commit directly when exception ocurs
           // if any split store reaches mmio space, delegate to software storeAddrMisaligned exception
           bufferState := s_wb
@@ -338,6 +389,14 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
         globalNC   := false.B
       }
     }
+
+    is (s_terminal_req) {
+      when (io.splitStoreReq.fire) { bufferState := s_terminal_resp }
+    }
+    is (s_terminal_resp) {
+      // SQ metadata is now final; the existing WB arbiter still owns actual ROB acceptance.
+      when (terminalResponse) { bufferState := s_wb }
+    }
   }
 
   val alignedType = Mux(req.isvec, req.alignedType(1,0), req.uop.fuOpType(1, 0))
@@ -377,12 +436,20 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
     } .otherwise {
       // split this unaligned store into `maxSplitNum` aligned stores
       unWriteStores := Fill(maxSplitNum, 1.U(1.W))
-      unSentStores := Fill(maxSplitNum, 1.U(1.W))
-      curPtr := 0.U
+      unSentStores := Mux(probeOwner, "b10".U, Fill(maxSplitNum, 1.U(1.W)))
+      curPtr := Mux(probeOwner, 1.U, 0.U)
       lowAddrStore.uop := req.uop
       lowAddrStore.uop.exceptionVec(storeAddrMisaligned) := false.B
       highAddrStore.uop := req.uop
       highAddrStore.uop.exceptionVec(storeAddrMisaligned) := false.B
+      for (fragment <- Seq(lowAddrStore, highAddrStore)) {
+        fragment.fullva := req.fullva
+        fragment.vaNeedExt := req.vaNeedExt
+        fragment.fdiStoreProbe.foreach(_ := req.fdiStoreProbe.get)
+        fragment.fdiSourcePrivilege.foreach(_ := req.fdiSourcePrivilege.get)
+        fragment.fdiSourceVirtual.foreach(_ := req.fdiSourceVirtual.get)
+        when (probeOwner) { fragment.uop.exceptionVec := 0.U.asTypeOf(ExceptionVec()) }
+      }
 
       switch (alignedType(1, 0)) {
         is (SB) {
@@ -538,12 +605,17 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
         }
       }
 
+      // Apply the fragment offset after the original PMM normalization, outside the STA input path.
+      when (!req.isvec && !LSUOpType.isHsv(req.uop.fuOpType) && !req.vaNeedExt) {
+        highAddrStore.fullva := req.fullva + (16.U(5.W) - req.fullva(3, 0))
+      }
       splitStoreReqs(0) := lowAddrStore
       splitStoreReqs(1) := highAddrStore
     }
   }
 
-  io.splitStoreReq.valid := req_valid && (bufferState === s_req)
+  io.splitStoreReq.valid := req_valid && (bufferState === s_req || bufferState === s_terminal_req) &&
+    (!(probeOwner || bufferState === s_terminal_req) || !req.uop.robIdx.needFlush(io.redirect))
   io.splitStoreReq.bits  := splitStoreReqs(curPtr)
   io.splitStoreReq.bits.isvec  := req.isvec
   // Restore the information of H extension store
@@ -553,15 +625,75 @@ class StoreMisalignBuffer(implicit p: Parameters) extends XSModule
   io.splitStoreReq.bits.alignedType  := Mux(req.isvec, splitStoreReqs(curPtr).uop.fuOpType(1, 0), req.alignedType)
   io.splitStoreReq.bits.isFinalSplit := curPtr(0)
 
-  when (io.splitStoreResp.valid) {
+  when (bufferState === s_terminal_req) {
+    connectSamePort(io.splitStoreReq.bits, req)
+    io.splitStoreReq.bits.fullva := terminalFullva
+    io.splitStoreReq.bits.vaddr := terminalFullva(VAddrBits - 1, 0)
+    io.splitStoreReq.bits.vaNeedExt := terminalVaNeedExt
+    io.splitStoreReq.bits.gpaddr := terminalGpaddr
+    io.splitStoreReq.bits.isHyper := terminalIsHyper
+    io.splitStoreReq.bits.isForVSnonLeafPTE := terminalVSnonLeaf
+    io.splitStoreReq.bits.uop.exceptionVec := exceptionVec
+    io.splitStoreReq.bits.hasException := true.B
+    io.splitStoreReq.bits.isFrmMisAlignBuf := true.B
+    io.splitStoreReq.bits.isFinalSplit := false.B
+    io.splitStoreReq.bits.isMisalign := false.B
+    io.splitStoreReq.bits.fdiStoreProbe.foreach(_ := false.B)
+    io.splitStoreReq.bits.mmio := false.B
+    io.splitStoreReq.bits.nc := false.B
+  }
+
+  // A terminal acknowledgment completes SQ metadata; it is not another fragment result.
+  when (bufferState === s_resp && Mux(probeOwner, probeResponse, io.splitStoreResp.valid)) {
     val resp = io.splitStoreResp.bits
     splitStoreResp(curPtr) := io.splitStoreResp.bits
-    when (isUncache) {
+    when (probeOwner) {
+      if (HasFDI) {
+        when (hasException || isUncache || !resp.need_rep) {
+          unSentStores := 0.U
+          unWriteStores := 0.U
+          exceptionVec := req.uop.exceptionVec
+          terminalFullva := req.fullva
+          terminalVaNeedExt := req.vaNeedExt
+          terminalGpaddr := req.gpaddr
+          terminalIsHyper := req.isHyper
+          terminalVSnonLeaf := req.isForVSnonLeafPTE
+          when (hasStandardException) {
+            exceptionVec := ExceptionNO.selectByFu(resp.uop.exceptionVec, StaCfg)
+            terminalFullva := resp.fullva
+            terminalVaNeedExt := resp.vaNeedExt
+            terminalGpaddr := resp.gpaddr
+            terminalIsHyper := resp.isHyper
+            terminalVSnonLeaf := resp.isForVSnonLeafPTE
+          }.elsewhen (isUncache) {
+            exceptionVec := 0.U.asTypeOf(ExceptionVec())
+            exceptionVec(storeAddrMisaligned) := true.B
+          }
+        }
+      }
+    }.elsewhen (isUncache) {
+      when (scalarUncache) {
+        terminalFullva := req.fullva
+        terminalVaNeedExt := req.vaNeedExt
+        terminalGpaddr := req.gpaddr
+        terminalIsHyper := req.isHyper
+        terminalVSnonLeaf := req.isForVSnonLeafPTE
+      }
       unWriteStores := 0.U
       unSentStores := 0.U
       exceptionVec := ExceptionNO.selectByFu(0.U.asTypeOf(exceptionVec.cloneType), StaCfg)
       // delegate to software
       exceptionVec(storeAddrMisaligned) := true.B
+      when (scalarUncache && hasStandardException) {
+        // Translation or protection faults outrank the uncached attribute. The
+        // terminal still clears SQ classification before reporting that fault.
+        exceptionVec := ExceptionNO.selectByFu(resp.uop.exceptionVec, StaCfg)
+        terminalFullva := resp.fullva
+        terminalVaNeedExt := resp.vaNeedExt
+        terminalGpaddr := resp.gpaddr
+        terminalIsHyper := resp.isHyper
+        terminalVSnonLeaf := resp.isForVSnonLeafPTE
+      }
     } .elsewhen (hasException) {
       unWriteStores := 0.U
       unSentStores := 0.U

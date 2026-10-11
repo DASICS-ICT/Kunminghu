@@ -14,6 +14,7 @@ TOPS = {
     "backend": "FDIFullControlHarness",
     "frontend": "FDITrustMetadataFrontendHarness",
     "load-misalign": "FDILoadMisalignHarness",
+    "store-misalign": "FDIStoreMisalignHarness",
 }
 MARKERS = ("fdiNotTrusted", "fdiRawRVC", "fdiInstr", "fdiTrapInst")
 # Ignore comments and strings: only Verilog identifiers establish field presence.
@@ -30,7 +31,18 @@ SYNTHESIS_FIXTURES = {
                 "--l2-cache-size", "256", "--l3-cache-size", "768", "--fpga-platform",
                 "--disable-always-basic-diff", "--disable-perf", "--disable-alwaysdb"],
             "vector_length_bits": 128, "load_to_load_forwarding": False}},
+    "store-misalign": {"sources": {"src/test/scala/xiangshan/mem/" + name for name in
+            ("FDIStorePermissionHarness.scala", "FDIStoreMisalignHarness.scala")},
+        "suite": "local", "parameters": {"parameter_factory": "FDIStoreMisalignTest configuration",
+            "parameter_args": ["--config", "FpgaDefaultConfig", "--num-cores", "1",
+                "--l2-cache-size", "256", "--l3-cache-size", "768", "--fpga-platform",
+                "--disable-always-basic-diff", "--disable-perf", "--disable-alwaysdb"],
+            "vector_length_bits": 128, "store_address_ports": 2,
+            "store_data_ports": 2, "publication_ports": 2}},
 }
+STORE_MODULES = ("StoreUnit", "TLBNonBlock", "PMPChecker", "StoreMisalignBuffer", "StoreQueue",
+                 "SQDataModule", "SQAddrModule", "DatamoduleResultBuffer", "StoreExceptionBuffer",
+                 "Sbuffer", "SbufferData")
 RUNNER = "tests/dasics-validation/runner.py"
 
 
@@ -99,7 +111,7 @@ def synthesis_relation(run, simulation, feature, fixture="backend"):
             "relation": "Same frozen production and fixture sources; not byte-identical simulation RTL"}
 
 
-def candidate_relation(run, candidate_path, feature, fixture="backend"):
+def candidate_relation(run, candidate_path, feature, fixture="backend", snapshot="after"):
     command, emit_manifest, emit = source_provenance(run, feature)
     require(command.get("suite") == "timing-emit" and emit["source_test_exit_code"] == 0 and
             command.get("runner_exit_code") == 0 and command.get("status") == "PASS",
@@ -107,8 +119,17 @@ def candidate_relation(run, candidate_path, feature, fixture="backend"):
     candidate_path = candidate_path.resolve(strict=True)
     data = candidate_path.read_bytes()
     candidate = json.loads(data)
-    require(candidate.get("status") == "PREPARED" and
-            SYNTHESIS_FIXTURES[fixture]["suite"] in candidate.get("available_suites", []),
+    functional_candidate = SYNTHESIS_FIXTURES[fixture]["suite"] in candidate.get("available_suites", [])
+    # A paired store baseline can use the final fixture without compiling new
+    # functional stimuli against old production. Bind only that emit's own
+    # committed production snapshot, and retain its untested status explicitly.
+    timing_only_baseline = (fixture == "store-misalign" and snapshot == "before" and
+        candidate.get("available_suites") == ["timing-emit"] and
+        candidate_path == Path(emit["source_manifest"]).resolve(strict=True) and
+        all(entry.get("origin") == "committed" for entry in candidate.get("files", [])
+            if "/src/main/" in "/" + entry["path"] or
+            entry["path"].startswith(("macros/src/", "rocket-chip/cde/cde/src/"))))
+    require(candidate.get("status") == "PREPARED" and (functional_candidate or timing_only_baseline),
             "candidate is not a frozen functional source for the requested fixture")
     count = equivalent_sources(emit_manifest, candidate, (RUNNER,), fixture)
     tool = command["environment"].get("CHISEL_FIRTOOL_PATH")
@@ -125,8 +146,11 @@ def candidate_relation(run, candidate_path, feature, fixture="backend"):
             "planned_parameter_metadata": SYNTHESIS_FIXTURES[fixture]["parameters"],
             "planned_firtool_directory": tool},
         "observed_emit_feature": feature,
-        "relation": "Frozen functional candidate only; no completed fixture simulation is claimed",
-        "followup": "Append a completed functional-run acceptance record without replacing this PENDING record; changed production or fixture sources require a new emit and timing review"}
+        "relation": ("Same frozen timing-only baseline used by the successful emit; no functional simulation is claimed"
+            if timing_only_baseline else "Frozen functional candidate only; no completed fixture simulation is claimed"),
+        "candidate_kind": "TIMING_ONLY_BASELINE" if timing_only_baseline else "FUNCTIONAL_CANDIDATE",
+        "followup": ("This baseline has no compiled functional suite; retain PENDING as untested. Changed production or fixture sources require a new emit and timing review"
+            if timing_only_baseline else "Append a completed functional-run acceptance record without replacing this PENDING record; changed production or fixture sources require a new emit and timing review")}
 
 
 def export(args):
@@ -158,7 +182,7 @@ def export(args):
                 "synthesis-view export requires a supported fixture, successful emit, and a simulation binding")
         relation = (synthesis_relation(run, args.simulation_run_directory.resolve(strict=True), args.feature, args.fixture)
                     if args.simulation_run_directory else
-                    candidate_relation(run, args.simulation_source_manifest, args.feature, args.fixture))
+                    candidate_relation(run, args.simulation_source_manifest, args.feature, args.fixture, args.snapshot))
         expected = {"schema_version": 1, "status": "SYNTHESIS_VIEW_EMITTED", "top": top,
             "feature": args.feature,
             "generator": "top.Generator / top.XiangShanStage", "chisel_version": "6.6.0",
@@ -172,6 +196,7 @@ def export(args):
         require(all(view.get(k) == v for k, v in expected.items()), "unexpected synthesis-view emission contract")
     else:
         require(args.fixture != "load-misalign", "load-misalign export requires a standard synthesis view")
+        require(args.fixture != "store-misalign", "store-misalign export requires a standard synthesis view")
         require(args.simulation_run_directory is None and args.simulation_source_manifest is None,
                 "simulation binding arguments require a synthesis view")
     native = not synthesis and (run / "compiled/primary-sources").is_dir()
@@ -222,6 +247,7 @@ def export(args):
                 len(view["rtl_files"]) == len(paths), "emission record and RTL file lists disagree")
 
     top_files = []
+    module_names = set()
     marker_files = {marker: [] for marker in MARKERS}
     records = []
     for relative in paths:
@@ -230,7 +256,9 @@ def export(args):
         if not native and not synthesis:
             require(not re.search(r"(?m)^\s*`include\b|\$(?:readmemh|readmemb)\b", code),
                     "monolithic frontend RTL references an unsupported external asset")
-        top_files.extend([str(relative)] * MODULE.findall(code).count(top))
+        definitions = MODULE.findall(code)
+        top_files.extend([str(relative)] * definitions.count(top))
+        module_names.update(definitions)
         identifiers = set(IDENTIFIER.findall(code))
         for marker in MARKERS:
             if any(marker in identifier for identifier in identifiers):
@@ -238,7 +266,16 @@ def export(args):
         records.append({"path": f"rtl/{relative.as_posix()}",
                         "sha256": sha256(data), "bytes": len(data)})
     require(len(top_files) == 1, f"expected one definition of {top}, found {top_files}")
-    if args.fixture != "load-misalign":
+    if args.fixture == "store-misalign":
+        # These are the real address-check and byte-publication consumers, not
+        # replacements built only from the permission checker or a load fixture.
+        def has_module(reference):
+            return any(re.fullmatch(re.escape(reference) + r"(?:_\d+)?", name) for name in module_names)
+        require(all(has_module(reference) for reference in STORE_MODULES),
+                "store synthesis view is missing a required production module type")
+        require(has_module("FDIPermissionChecker") == (args.feature == "on"),
+                "store permission module disagrees with the requested feature")
+    if args.fixture not in ("load-misalign", "store-misalign"):
         require(bool(marker_files["fdiNotTrusted"]) == (args.feature == "on"),
                 "fdiNotTrusted identifiers disagree with requested feature identity")
         if args.snapshot == "after" and args.feature == "on":
@@ -298,6 +335,8 @@ def export(args):
         if args.simulation_source_manifest:
             manifest.update(functional_status="PENDING",
                             simulation_source_manifest=relation["simulation"]["source_manifest"])
+    if args.fixture == "store-misalign":
+        manifest["required_store_module_types"] = list(STORE_MODULES)
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     checksum_paths = [r["path"] for r in records] + ["sources.f", "identity.tsv", "manifest.json"]
     checksums = []

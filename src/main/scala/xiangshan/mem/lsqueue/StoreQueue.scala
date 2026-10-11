@@ -271,6 +271,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   val waitStoreS2 = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // wait for mmio and exception result until store_s2
   // A same-cycle allocation owns the slot over a delayed result from its former owner.
   val fdiSlotReallocated = Option.when(HasFDI)(Wire(Vec(StoreQueueSize, Bool())))
+  // Native terminal exceptions must not update a slot being allocated to another owner.
+  val terminalSlotReallocated = Wire(Vec(StoreQueueSize, Bool()))
   // val vec_robCommit = Reg(Vec(StoreQueueSize, Bool())) // vector store committed by rob
   // val vec_secondInv = RegInit(VecInit(List.fill(StoreQueueSize)(false.B))) // Vector unit-stride, second entry is invalid
   val vecExceptionFlag = RegInit(0.U.asTypeOf(Valid(new DynInst)))
@@ -378,6 +380,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
     val entryCanEnq = entryCanEnqSeq.reduce(_ || _)
     fdiSlotReallocated.foreach(_(i) := entryCanEnq)
+    terminalSlotReallocated(i) := entryCanEnq
     val selectBits = ParallelPriorityMux(entryCanEnqSeq, io.enq.req.map(_.bits))
     val selectUpBound = ParallelPriorityMux(entryCanEnqSeq, enqUpBound)
     when (entryCanEnq) {
@@ -487,6 +490,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     vaddrModule.io.wen(i) := false.B
     dataModule.io.mask.wen(i) := false.B
     val stWbIndex = io.storeAddrIn(i).bits.uop.sqIdx.value
+    val stWbTerminal = io.storeAddrIn(i).bits.isFrmMisAlignBuf && io.storeAddrIn(i).bits.hasException
     val stWbScalar = if (HasFDI) {
       !io.storeAddrIn(i).bits.isvec && !io.storeAddrIn(i).bits.isFrmMisAlignBuf &&
         !LSUOpType.isCboAll(io.storeAddrIn(i).bits.uop.fuOpType) &&
@@ -498,8 +502,20 @@ class StoreQueue(implicit p: Parameters) extends XSModule
         uop(stWbIndex).sqIdx === io.storeAddrIn(i).bits.uop.sqIdx &&
         !io.storeAddrIn(i).bits.uop.robIdx.needFlush(io.brqRedirect))
     } else true.B
-    val storeAddrAccepted = io.storeAddrIn(i).fire && stWbOwnerLive
-    exceptionBuffer.io.storeAddrIn(i).valid := storeAddrAccepted && !io.storeAddrIn(i).bits.miss && !io.storeAddrIn(i).bits.isvec
+    val terminalOwnerLive = allocated(stWbIndex) && !terminalSlotReallocated(stWbIndex) &&
+      uop(stWbIndex).robIdx === io.storeAddrIn(i).bits.uop.robIdx &&
+      uop(stWbIndex).sqIdx === io.storeAddrIn(i).bits.uop.sqIdx &&
+      uop(stWbIndex).uopIdx === io.storeAddrIn(i).bits.uop.uopIdx &&
+      !io.storeAddrIn(i).bits.uop.robIdx.needFlush(io.brqRedirect)
+    val storeAddrAccepted = io.storeAddrIn(i).fire && stWbOwnerLive && (!stWbTerminal || terminalOwnerLive)
+    when (io.storeAddrIn(i).valid && stWbTerminal &&
+      !io.storeAddrIn(i).bits.uop.robIdx.needFlush(io.brqRedirect)) {
+      assert(terminalOwnerLive && !committed(stWbIndex),
+        "A terminal S1 record must own a live uncommitted SQ entry")
+    }
+    // A terminal is nominated only by its matched S2 supplement, never by a provisional S1 record.
+    exceptionBuffer.io.storeAddrIn(i).valid := storeAddrAccepted && !stWbTerminal &&
+      !io.storeAddrIn(i).bits.miss && !io.storeAddrIn(i).bits.isvec
     exceptionBuffer.io.storeAddrIn(i).bits := io.storeAddrIn(i).bits
     // will re-enter exceptionbuffer at store_s2
     exceptionBuffer.io.storeAddrIn(StorePipelineWidth + i).valid := false.B
@@ -511,6 +527,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       nc(stWbIndex) := io.storeAddrIn(i).bits.nc
 
     }
+    when (storeAddrAccepted && stWbTerminal) { waitStoreS2(stWbIndex) := true.B }
     when (storeAddrAccepted && !io.storeAddrIn(i).bits.isFrmMisAlignBuf) {
       // pending(stWbIndex) := io.storeAddrIn(i).bits.mmio
       unaligned(stWbIndex) := io.storeAddrIn(i).bits.isMisalign
@@ -552,6 +569,24 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val stWbIndexReg = RegEnable(stWbIndex, storeAddrAccepted)
     val storeAddrSeenReg = RegNext(storeAddrAccepted && !io.storeAddrIn(i).bits.miss)
     val stWbScalarReg = Option.when(HasFDI)(RegEnable(stWbScalar, false.B, storeAddrAccepted))
+    val stWbTerminalReg = RegEnable(stWbTerminal, false.B, storeAddrAccepted)
+    val terminalSq = RegEnable(io.storeAddrIn(i).bits.uop.sqIdx, storeAddrAccepted)
+    val terminalRob = RegEnable(io.storeAddrIn(i).bits.uop.robIdx, storeAddrAccepted)
+    val terminalUop = RegEnable(io.storeAddrIn(i).bits.uop.uopIdx, storeAddrAccepted)
+    val terminalVA = RegEnable(io.storeAddrIn(i).bits.fullva, storeAddrAccepted && stWbTerminal)
+    val terminalExceptions = RegEnable(io.storeAddrIn(i).bits.uop.exceptionVec, storeAddrAccepted && stWbTerminal)
+    val terminalSupplementLive = allocated(stWbIndexReg) && !terminalSlotReallocated(stWbIndexReg) &&
+      uop(stWbIndexReg).robIdx === terminalRob && uop(stWbIndexReg).sqIdx === terminalSq &&
+      uop(stWbIndexReg).uopIdx === terminalUop && !terminalRob.needFlush(io.brqRedirect)
+    val terminalSupplementMatches = io.storeAddrInRe(i).uop.robIdx === terminalRob &&
+      io.storeAddrInRe(i).uop.sqIdx === terminalSq && io.storeAddrInRe(i).uop.uopIdx === terminalUop &&
+      io.storeAddrInRe(i).isFrmMisAlignBuf && io.storeAddrInRe(i).hasException &&
+      io.storeAddrInRe(i).fullva === terminalVA &&
+      io.storeAddrInRe(i).uop.exceptionVec.asUInt === terminalExceptions.asUInt
+    when (storeAddrSeenReg && stWbTerminalReg && !terminalRob.needFlush(io.brqRedirect)) {
+      assert(terminalSupplementLive && terminalSupplementMatches && io.storeAddrInRe(i).updateAddrValid,
+        "A terminal S2 supplement must complete the same accepted SQ owner and exception")
+    }
     // The unqualified S2 port follows the preceding S1 acceptance, including pointer flags.
     val replenishOwnerLive = if (HasFDI) {
       val sq = RegEnable(io.storeAddrIn(i).bits.uop.sqIdx, storeAddrAccepted)
@@ -567,7 +602,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       }
       !stWbScalarReg.get || (live && matches)
     } else true.B
-    val storeAddrInFireReg = storeAddrSeenReg && io.storeAddrInRe(i).updateAddrValid && replenishOwnerLive
+    val storeAddrInFireReg = storeAddrSeenReg && io.storeAddrInRe(i).updateAddrValid && replenishOwnerLive &&
+      (!stWbTerminalReg || terminalSupplementLive && terminalSupplementMatches)
     val scalarException = if (HasFDI) stWbScalarReg.get && io.storeAddrInRe(i).hasException else false.B
     when (storeAddrInFireReg) {
       pending(stWbIndexReg) := io.storeAddrInRe(i).mmio && !scalarException
@@ -575,6 +611,13 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       memBackTypeMM(stWbIndexReg) := io.storeAddrInRe(i).memBackTypeMM
       hasException(stWbIndexReg) := io.storeAddrInRe(i).hasException
       waitStoreS2(stWbIndexReg) := false.B
+      when (stWbTerminalReg) {
+        pending(stWbIndexReg) := false.B
+        mmio(stWbIndexReg) := false.B
+        nc(stWbIndexReg) := false.B
+        uop(stWbIndexReg).exceptionVec := io.storeAddrInRe(i).uop.exceptionVec
+        uop(stWbIndexReg).fdiException.foreach(_ := io.storeAddrInRe(i).uop.fdiException.get)
+      }
       if (HasFDI) {
         when (stWbScalarReg.get) {
           // An exceptional NC store must drain as an empty token, never wait for an unsent write.

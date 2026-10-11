@@ -257,6 +257,8 @@ def run_locked(args, profile, directory, source, manifest, prepared, cache, sess
     }
     if directory == "tests/dasics-load-misalign":
         settings.update(L04_FDI_ENABLED=args.enabled, L04_SCENARIO=args.scenario)
+    if directory == "tests/dasics-store-misalign":
+        settings.update(L05_FDI_ENABLED=args.enabled, L05_SCENARIO=args.scenario)
     if directory == "tests/dasics-control-completion":
         settings.update(C08_FDI_ENABLED=args.enabled, C08_FRONTEND_SCENARIO="full")
     argv = ["/usr/bin/mill", "--no-server", "--home", str(java_runtime), "-j", str(args.jobs)]
@@ -350,7 +352,7 @@ def main(task_directory):
     parser.add_argument("--test-stack", default="256m")
     parser.add_argument("--control-tasks", default="f02,f03,f04")
     parser.add_argument("--scenario", choices=profile.get("scenarios", ()), default=profile.get("default_scenario"),
-                        help="Explicit L04 misaligned-load scenario")
+                        help="Explicit task validation scenario")
     args = parser.parse_args()
     for name in ("batch", "source_root", "overlay_manifest", "tool_source"):
         value = getattr(args, name)

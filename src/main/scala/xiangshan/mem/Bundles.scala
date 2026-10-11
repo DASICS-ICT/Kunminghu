@@ -63,6 +63,8 @@ object Bundles {
     val fdiSourceVirtual = Option.when(HasFDI)(Bool())
     // MAB-owned probes and terminal exceptions never authorize target-data access.
     val fdiLoadMode = Option.when(HasFDI)(UInt(2.W))
+    // A store probe retains its SMB owner but cannot update SQ or request target data.
+    val fdiStoreProbe = Option.when(HasFDI)(Bool())
     val vaNeedExt = Bool()
     val paddr = UInt(PAddrBits.W)
     val gpaddr = UInt(XLEN.W)
@@ -381,6 +383,11 @@ object Bundles {
   class MisalignBufferEnqIO(implicit p: Parameters) extends XSBundle {
     val req = DecoupledIO(new LqWriteBundle)
     val revoke = Output(Bool())
+  }
+
+  class StoreMisalignBufferEnqIO(implicit p: Parameters) extends MisalignBufferEnqIO {
+    // The S2 decision belongs to the preceding accepted S1 candidate on this port.
+    val deferToProbe = Option.when(HasFDI)(Output(Bool()))
   }
 
 }

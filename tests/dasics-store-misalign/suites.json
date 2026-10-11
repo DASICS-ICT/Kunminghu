@@ -1,0 +1,122 @@
+{
+  "test_sources": [
+    "src/test/scala/xiangshan/mem/FDIStorePermissionHarness.scala",
+    "src/test/scala/xiangshan/mem/FDIStoreMisalignHarness.scala",
+    "src/test/scala/xiangshan/mem/FDIStoreMisalignTest.scala",
+    "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/FDIStoreMisalignBackendHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/FDIStoreMisalignBackendTest.scala",
+    "src/test/scala/xiangshan/mem/FDIStoreMisalignTimingEmitTest.scala"
+  ],
+  "scenarios": [
+    "baseline",
+    "data",
+    "within16",
+    "supplemental",
+    "standard",
+    "addresses",
+    "retries",
+    "all",
+    "acceptance",
+    "cancellation",
+    "deferred-cancellation",
+    "allowed-cross16",
+    "allowed-cross-page",
+    "denied-high-page-pf",
+    "high-page-pf",
+    "denied-cross-page",
+    "integer-half-within16",
+    "floating-word-within16",
+    "floating-double-within16",
+    "integer-half-cross16",
+    "integer-word-cross16",
+    "integer-double-cross16-offset9",
+    "integer-double-cross16-offset15",
+    "floating-word-cross16",
+    "floating-double-cross16",
+    "integer-half-cross-page",
+    "integer-word-cross-page",
+    "floating-word-cross-page",
+    "floating-double-cross-page",
+    "integer-delayed-std",
+    "floating-delayed-std",
+    "high-page-af",
+    "denied-high-page-af",
+    "high-page-nc",
+    "denied-high-page-nc",
+    "floating-high-page-pf",
+    "high-page-pmp-write-denied",
+    "denied-high-page-pmp-write",
+    "high-page-pma-write-denied",
+    "denied-high-page-pma-write",
+    "high-page-nc-pmp-write-denied",
+    "denied-high-page-nc-pmp-write",
+    "high-page-pma-noncache",
+    "denied-high-page-pma-noncache",
+    "sv39-high-allowed",
+    "sv39-high-page-pf",
+    "sv39-high-denied-page-pf",
+    "bare-pmm16-cross16",
+    "sv48-pmm16-boundary-allowed",
+    "sv48-pmm16-boundary-denied",
+    "long-translation-retry",
+    "denied-long-high-translation",
+    "low-fragment-translation-retry",
+    "real-dual-publication-backpressure",
+    "cancel-sta-s1-new-owner",
+    "cancel-smb-candidate-s2-new-owner",
+    "cancel-high-fragment-s2-new-owner",
+    "cancel-probe-s2-new-owner",
+    "cancel-terminal-s1-new-owner",
+    "cancel-terminal-s2-new-owner"
+  ],
+  "default_scenario": "baseline",
+  "suites": {
+    "timing-emit": {
+      "class": "xiangshan.mem.FDIStoreMisalignTimingEmitTest",
+      "expected_cases": [
+        [
+          "xiangshan.mem.FDIStoreMisalignTimingEmitTest",
+          "DASICS misaligned-store synthesis view should emit the production store fixture with verification-only removal"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/mem/FDIStorePermissionHarness.scala",
+        "src/test/scala/xiangshan/mem/FDIStoreMisalignHarness.scala",
+        "src/test/scala/xiangshan/mem/FDIStoreMisalignTimingEmitTest.scala"
+      ],
+      "scope": "Same frozen real STA, STD, TLB, PMP, StoreMisalignBuffer, StoreQueue and Sbuffer fixture with standard synthesis-only verification removal; no functional or physical timing pass claim"
+    },
+    "local": {
+      "class": "xiangshan.mem.FDIStoreMisalignTest",
+      "expected_cases": [
+        [
+          "xiangshan.mem.FDIStoreMisalignTest",
+          "Scalar misaligned stores through production splitting and publication should preserve whole-access faults and publish only accepted store bytes"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/mem/FDIStorePermissionHarness.scala",
+        "src/test/scala/xiangshan/mem/FDIStoreMisalignHarness.scala",
+        "src/test/scala/xiangshan/mem/FDIStoreMisalignTest.scala"
+      ],
+      "scope": "Actual StoreUnit, StoreQueue, StoreMisalignBuffer and Sbuffer publication through the committed ordinary-store fixture and bounded translation/cache services; no Backend retirement, whole-core or physical timing claim"
+    },
+    "backend": {
+      "class": "xiangshan.backend.fu.FDIStoreMisalignBackendTest",
+      "expected_cases": [
+        [
+          "xiangshan.backend.fu.FDIStoreMisalignBackendTest",
+          "Nonaligned scalar stores through the production Backend should preserve store ownership, precise traps and atomic byte publication"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+        "src/test/scala/xiangshan/mem/FDIStorePermissionHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDIStoreMisalignBackendHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDIStoreMisalignBackendTest.scala"
+      ],
+      "scope": "Production Backend with the native store queue, misaligned-store buffer and store publication fixture; precise trap and recovery checks use bounded external services, without whole-core or physical timing claims"
+    }
+  }
+}

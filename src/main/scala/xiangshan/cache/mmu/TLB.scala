@@ -72,6 +72,9 @@ class TLB(Width: Int, nRespDups: Int = 1, Block: Seq[Boolean], q: TLBParameters)
   val flush_pipe = io.flushPipe
   val redirect = io.redirect
   val EffectiveVa = Wire(Vec(Width, UInt(XLEN.W)))
+  val responseFullva = Wire(Vec(Width, UInt(XLEN.W)))
+  // The returned representation and its extension qualification share the accepted request owner.
+  val responseFullvaDirect = RegInit(VecInit(Seq.fill(Width)(false.B)))
   val req_in = req
   val req_out = Reg(Vec(Width, new TlbReq))
   for (i <- 0 until Width) {
@@ -140,7 +143,7 @@ class TLB(Width: Int, nRespDups: Int = 1, Block: Seq[Boolean], q: TLBParameters)
   val preaf = WireInit(VecInit(Seq.fill(Width)(false.B)))
   val premode = (0 until Width).map(i => Mux(req_in(i).bits.hyperinst, csr.priv.spvp, mode_tmp))
   for (i <- 0 until Width) {
-    resp(i).bits.fullva := RegEnable(EffectiveVa(i), req(i).valid)
+    resp(i).bits.fullva := RegEnable(responseFullva(i), req(i).fire)
   }
   val prevmEnable = (0 until Width).map(i => !(virt_in || req_in(i).bits.hyperinst) && (
     if (EnbaleTlbDebug) (Sv39Enable || Sv48Enable)
@@ -186,6 +189,27 @@ class TLB(Width: Int, nRespDups: Int = 1, Block: Seq[Boolean], q: TLBParameters)
       } .otherwise {
         EffectiveVa(i) := req_in(i).bits.fullva
       }
+    }
+
+    val effectiveInput = req(i).bits.fullvaKind === TlbFullvaKind.Effective
+    val completeHostScalar = req(i).bits.fullvaKind === TlbFullvaKind.Scalar &&
+      !ifetch && !virt_in && !req(i).bits.hyperinst && !req(i).bits.isPrefetch &&
+      !req(i).bits.no_translate && req(i).bits.cmd === TlbCmd.read
+    // A split offset is applied after the original PMM normalization, never before another mask.
+    when (effectiveInput) { EffectiveVa(i) := req(i).bits.fullva }
+    responseFullva(i) := EffectiveVa(i)
+    if (!HasFDI) {
+      // An ordinary scalar queue retry already passed its initial full-address prefault check.
+      // Keep raw VPN and GPaddr inputs unchanged; only restore its returned host representation.
+      when (completeHostScalar && !req(i).bits.checkfullva) {
+        responseFullva(i) := Mux(prevmEnable(i),
+          Mux(Sv48Enable, SignExt(EffectiveVa(i)(47, 0), XLEN), SignExt(EffectiveVa(i)(38, 0), XLEN)),
+          ZeroExt(EffectiveVa(i)(PAddrBits - 1, 0), XLEN))
+      }
+    }
+    when (req(i).fire) {
+      assert(req(i).bits.fullvaKind =/= 3.U, "TLB request must identify a supported address representation")
+      responseFullvaDirect(i) := effectiveInput || completeHostScalar
     }
 
     val pf48 = SignExt(EffectiveVa(i)(47, 0), XLEN) =/= EffectiveVa(i)
@@ -480,7 +504,7 @@ class TLB(Width: Int, nRespDups: Int = 1, Block: Seq[Boolean], q: TLBParameters)
       resp(idx).bits.excp(nDups).af.st    := af && TlbCmd.isWrite(cmd) && fault_valid
       resp(idx).bits.excp(nDups).af.instr := af && TlbCmd.isExec(cmd) && fault_valid
 
-      resp(idx).bits.excp(nDups).vaNeedExt := true.B
+      resp(idx).bits.excp(nDups).vaNeedExt := !responseFullvaDirect(idx)
     }
 
     resp(idx).bits.excp(nDups).isHyper := isHyperInst(idx)

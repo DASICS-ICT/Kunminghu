@@ -1,0 +1,125 @@
+{
+  "test_sources": [
+    "src/test/scala/xiangshan/mem/FDILoadMisalignHarness.scala",
+    "src/test/scala/xiangshan/mem/FDILoadMisalignTest.scala",
+    "src/test/scala/xiangshan/mem/FDILoadMisalignTimingEmitTest.scala",
+    "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/FDILoadPermissionBackendHarness.scala",
+    "src/test/scala/xiangshan/backend/fu/FDILoadPermissionBackendTest.scala",
+    "src/test/scala/xiangshan/backend/fu/FDILoadMisalignBackendTest.scala"
+  ],
+  "scenarios": [
+    "allowed",
+    "boundaries",
+    "all",
+    "within16-half",
+    "within16-word",
+    "within16-double",
+    "cross16-half",
+    "cross16-unsigned-half",
+    "cross16-word-13",
+    "cross16-word-14",
+    "cross16-word-15",
+    "cross16-double-9",
+    "cross16-double-10",
+    "cross16-double-11",
+    "cross16-double-12",
+    "cross16-double-13",
+    "cross16-double-14",
+    "cross16-double-15",
+    "cross16-unsigned-word",
+    "cross16-floating-word",
+    "cross16-floating-double",
+    "cross-page-allowed",
+    "high-page-pf",
+    "high-page-af",
+    "denied-cross-page",
+    "denied-high-page-pf",
+    "denied-high-page-af",
+    "floating-high-page-pf",
+    "writeback-stall",
+    "flush-high-response",
+    "flush-wakeup-response",
+    "addresses",
+    "retries",
+    "competition",
+    "bare-pmm7-split",
+    "bare-pmm16-split",
+    "sv39-high-split",
+    "sv39-high-page-pf",
+    "sv39-high-denied-page-pf",
+    "sv39-pmm16-split",
+    "adjacent-bounds-not-spliced",
+    "overlapping-bounds-not-spliced",
+    "cross-page-bounds-not-spliced",
+    "low-fragment-nack",
+    "high-fragment-nack",
+    "both-fragments-nack",
+    "low-fragment-tlb-retry",
+    "high-fragment-tlb-retry",
+    "denied-high-probe-tlb-retry",
+    "fragment-request-backpressure",
+    "mab-full-two-owners",
+    "mab-full-writeback-stall",
+    "flush-low-response-new-owner",
+    "flush-high-nack-new-owner",
+    "flush-pending-exception-new-owner",
+    "sv39-high-noncanonical-allowed",
+    "sv39-high-noncanonical-denied",
+    "high-page-nc",
+    "supplemental",
+    "pmm16-sv48-boundary-allowed",
+    "pmm16-sv48-boundary-denied",
+    "machine-origin-guest-data-replay",
+    "flush-native-terminal-new-owner",
+    "flush-probe-new-owner",
+    "flush-fdi-terminal-new-owner"
+  ],
+  "default_scenario": "allowed",
+  "suites": {
+    "timing-emit": {
+      "class": "xiangshan.mem.FDILoadMisalignTimingEmitTest",
+      "expected_cases": [
+        [
+          "xiangshan.mem.FDILoadMisalignTimingEmitTest",
+          "DASICS misaligned-load synthesis view should emit the production load fixture with verification-only removal"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/mem/FDILoadMisalignHarness.scala",
+        "src/test/scala/xiangshan/mem/FDILoadMisalignTimingEmitTest.scala"
+      ],
+      "scope": "Frozen production LoadUnit/MAB/TLB/PMP fixture with identical functional parameters, emitted through standard remove-assert for synthesis only; no functional or timing pass claim"
+    },
+    "local": {
+      "class": "xiangshan.mem.FDILoadMisalignTest",
+      "expected_cases": [
+        [
+          "xiangshan.mem.FDILoadMisalignTest",
+          "Scalar misaligned loads through production splitting and translation should preserve whole-access permission and complete the original owner exactly once"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/mem/FDILoadMisalignHarness.scala",
+        "src/test/scala/xiangshan/mem/FDILoadMisalignTest.scala"
+      ],
+      "scope": "Actual LoadUnit, LoadMisalignBuffer, TLB and permission path using bounded cache/PTW services; no Backend retirement, whole-core or physical timing claim"
+    },
+    "backend": {
+      "class": "xiangshan.backend.fu.FDILoadMisalignBackendTest",
+      "expected_cases": [
+        [
+          "xiangshan.backend.fu.FDILoadMisalignBackendTest",
+          "Load permission with real scheduling, data bypass and precise trap completion should block denied data while preserving the actual ROB exception completion"
+        ]
+      ],
+      "sources": [
+        "src/test/scala/xiangshan/backend/fu/UserTimerDeliveryHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDILoadPermissionBackendHarness.scala",
+        "src/test/scala/xiangshan/backend/fu/FDILoadPermissionBackendTest.scala",
+        "src/test/scala/xiangshan/backend/fu/FDILoadMisalignBackendTest.scala"
+      ],
+      "scope": "Actual Backend, MAB, LoadUnit, native writeback arbitration and LQ lifecycle with integer/FP consumers and precise same-EPC recovery; bounded cache/PTW/PMP services, no whole-core or physical timing claim"
+    }
+  }
+}

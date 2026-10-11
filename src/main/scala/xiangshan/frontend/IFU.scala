@@ -872,6 +872,7 @@ class NewIFU(implicit p: Parameters) extends XSModule
   io.iTLBInter.req.bits.kill               := false.B // IFU use itlb for mmio, doesn't need sync, set it to false
   io.iTLBInter.req.bits.no_translate       := false.B
   io.iTLBInter.req.bits.fullva             := 0.U
+  io.iTLBInter.req.bits.fullvaKind         := xiangshan.cache.mmu.TlbFullvaKind.Raw
   io.iTLBInter.req.bits.checkfullva        := false.B
   io.iTLBInter.req.bits.hyperinst          := DontCare
   io.iTLBInter.req.bits.hlvx               := DontCare

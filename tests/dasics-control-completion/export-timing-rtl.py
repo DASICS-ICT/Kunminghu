@@ -13,6 +13,7 @@ import sys
 TOPS = {
     "backend": "FDIFullControlHarness",
     "frontend": "FDITrustMetadataFrontendHarness",
+    "load-misalign": "FDILoadMisalignHarness",
 }
 MARKERS = ("fdiNotTrusted", "fdiRawRVC", "fdiInstr", "fdiTrapInst")
 # Ignore comments and strings: only Verilog identifiers establish field presence.
@@ -23,6 +24,12 @@ SYNTHESIS_FIXTURES = {
     "backend": {"sources": {"src/test/scala/xiangshan/backend/fu/" + name for name in
                             ("UserTimerDeliveryHarness.scala", "FDIFullControlHarness.scala")},
                 "suite": "control", "parameters": {"parameter_factory": "UserTimerDeliveryParameters"}},
+    "load-misalign": {"sources": {"src/test/scala/xiangshan/mem/FDILoadMisalignHarness.scala"},
+        "suite": "local", "parameters": {"parameter_factory": "FDILoadMisalignTest configuration",
+            "parameter_args": ["--config", "FpgaDefaultConfig", "--num-cores", "1",
+                "--l2-cache-size", "256", "--l3-cache-size", "768", "--fpga-platform",
+                "--disable-always-basic-diff", "--disable-perf", "--disable-alwaysdb"],
+            "vector_length_bits": 128, "load_to_load_forwarding": False}},
 }
 RUNNER = "tests/dasics-validation/runner.py"
 
@@ -164,6 +171,7 @@ def export(args):
         expected.update(SYNTHESIS_FIXTURES[args.fixture]["parameters"])
         require(all(view.get(k) == v for k, v in expected.items()), "unexpected synthesis-view emission contract")
     else:
+        require(args.fixture != "load-misalign", "load-misalign export requires a standard synthesis view")
         require(args.simulation_run_directory is None and args.simulation_source_manifest is None,
                 "simulation binding arguments require a synthesis view")
     native = not synthesis and (run / "compiled/primary-sources").is_dir()
@@ -230,15 +238,16 @@ def export(args):
         records.append({"path": f"rtl/{relative.as_posix()}",
                         "sha256": sha256(data), "bytes": len(data)})
     require(len(top_files) == 1, f"expected one definition of {top}, found {top_files}")
-    require(bool(marker_files["fdiNotTrusted"]) == (args.feature == "on"),
-            "fdiNotTrusted identifiers disagree with requested feature identity")
-    if args.snapshot == "after" and args.feature == "on":
-        needed = MARKERS[1:] if args.fixture == "backend" else ("fdiRawRVC",)
-        for marker in needed:
-            require(marker_files[marker], f"after-on RTL is missing {marker} identifiers")
-    else:
-        require(not any(marker_files[m] for m in MARKERS[1:]),
-                "before/off RTL contains fields belonging to the after-on implementation")
+    if args.fixture != "load-misalign":
+        require(bool(marker_files["fdiNotTrusted"]) == (args.feature == "on"),
+                "fdiNotTrusted identifiers disagree with requested feature identity")
+        if args.snapshot == "after" and args.feature == "on":
+            needed = MARKERS[1:] if args.fixture == "backend" else ("fdiRawRVC",)
+            for marker in needed:
+                require(marker_files[marker], f"after-on RTL is missing {marker} identifiers")
+        else:
+            require(not any(marker_files[m] for m in MARKERS[1:]),
+                    "before/off RTL contains fields belonging to the after-on implementation")
 
     output.mkdir(parents=True)
     for relative, record in zip(paths, records):

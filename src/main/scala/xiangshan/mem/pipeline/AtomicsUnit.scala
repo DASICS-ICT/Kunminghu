@@ -457,6 +457,7 @@ class AtomicsUnit(implicit p: Parameters) extends XSModule
   io.dtlb.req.valid       := state === s_tlb_and_flush_sbuffer_req
   io.dtlb.req.bits.vaddr  := vaddr
   io.dtlb.req.bits.fullva := vaddr
+  io.dtlb.req.bits.fullvaKind := xiangshan.cache.mmu.TlbFullvaKind.Raw
   io.dtlb.req.bits.checkfullva := true.B
   io.dtlb.resp.ready      := true.B
   io.dtlb.req.bits.cmd    := Mux(isLr, TlbCmd.atom_read, TlbCmd.atom_write)

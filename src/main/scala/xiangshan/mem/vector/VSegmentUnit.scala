@@ -447,6 +447,7 @@ class VSegmentUnit (implicit p: Parameters) extends VLSUModule
   io.dtlb.req.bits.cmd                := Mux(isVSegLoad, TlbCmd.read, TlbCmd.write)
   io.dtlb.req.bits.vaddr              := tlbReqVaddr(VAddrBits - 1, 0)
   io.dtlb.req.bits.fullva             := tlbReqVaddr
+  io.dtlb.req.bits.fullvaKind         := xiangshan.cache.mmu.TlbFullvaKind.Raw
   io.dtlb.req.bits.checkfullva        := true.B
   io.dtlb.req.bits.size               := instMicroOp.alignedType(2,0)
   io.dtlb.req.bits.memidx.is_ld       := isVSegLoad

@@ -38,6 +38,12 @@ import math._
 
 object Bundles {
 
+  object FDILoadMode {
+    val Normal = 0.U(2.W)
+    val Probe = 1.U(2.W)
+    val Terminal = 2.U(2.W)
+  }
+
   // Live block-local configuration; each permission request samples it on acceptance.
   class FDIMemoryConfig extends Bundle {
     val policy = new FDIPolicyConfig
@@ -55,6 +61,8 @@ object Bundles {
     // Instruction origin survives retries independently of the data translation mode.
     val fdiSourcePrivilege = Option.when(HasFDI)(UInt(2.W))
     val fdiSourceVirtual = Option.when(HasFDI)(Bool())
+    // MAB-owned probes and terminal exceptions never authorize target-data access.
+    val fdiLoadMode = Option.when(HasFDI)(UInt(2.W))
     val vaNeedExt = Bool()
     val paddr = UInt(PAddrBits.W)
     val gpaddr = UInt(XLEN.W)

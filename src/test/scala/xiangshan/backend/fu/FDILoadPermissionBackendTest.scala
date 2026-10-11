@@ -14,14 +14,17 @@ import svsim.{CommonCompilationSettings, Workspace}
 import svsim.verilator.Backend
 import xiangshan.frontend.{BranchPredictionBundle, FtqPtr}
 
-class FDILoadPermissionBackendTest(val replayCases: Boolean = false) extends AnyFlatSpec {
-  def this() = this(false)
+class FDILoadPermissionBackendTest(val replayCases: Boolean = false, val misalignCases: Boolean = false) extends AnyFlatSpec {
+  def this() = this(false, false)
   behavior of "Load permission with real scheduling, data bypass and precise trap completion"
-  private val enabled = sys.env.getOrElse("L01_FDI_ENABLED",
-    throw new IllegalArgumentException("L01_FDI_ENABLED must be explicit")).toBoolean
-  private val scenario = if (replayCases) "replay" else sys.env.getOrElse("L01_SCENARIO", "minimal")
-  require(Set("minimal", "full", "remaining", "replay").contains(scenario))
+  private val enabledVariable = if (misalignCases) "L04_FDI_ENABLED" else "L01_FDI_ENABLED"
+  private val enabled = sys.env.getOrElse(enabledVariable,
+    throw new IllegalArgumentException(s"$enabledVariable must be explicit")).toBoolean
+  require(!(replayCases && misalignCases), "Use one dedicated Backend scenario entry")
+  private val scenario = if (misalignCases) "misalign" else if (replayCases) "replay" else sys.env.getOrElse("L01_SCENARIO", "minimal")
+  require(Set("minimal", "full", "remaining", "replay", "misalign").contains(scenario))
   require(scenario != "replay" || replayCases, "Replay scenarios require the dedicated replay test entry")
+  require(scenario != "misalign" || misalignCases, "Misalignment scenarios require the dedicated test entry")
   private val allowedData = BigInt("123456789abcdef0", 16)
   private val deniedData = BigInt("d35ec0de87654321", 16)
   private val followingData = BigInt("596a7b8c9daebfc0", 16)
@@ -1817,8 +1820,479 @@ class FDILoadPermissionBackendTest(val replayCases: Boolean = false) extends Any
     }
   }
 
+  // An architectural retry is a new occurrence even if its PC or physical
+  // pointers repeat. Fragment/probe attempts remain children of that occurrence.
+  private case class MisalignOccurrence(pc: BigInt, generation: Int)
+  private case class MisalignCache(lane: Int, accepted: Int, address: BigInt, id: BigInt,
+    owner: MisalignOccurrence, var killed: Boolean = false)
+  private case class MisalignPtw(due: Int, vpn: BigInt, lq: BigInt)
+
+  private class MisalignDriver(module: FDILoadPermissionBackendHarness, name: String) extends Driver(module) {
+    private val view = dut.memory.misalign.get
+    private val sourcePc = BigInt(0x4000)
+    private val floating = name.startsWith("floating")
+    private val translated = name.startsWith("floating")
+    private val highPageFault = name == "floating-high-page-pf"
+    private val repair = name == "same-epc-bound-repair"
+    private val delegated = name == "supervisor-delegated"
+    private val privilege = if (delegated) 1 else 0
+    private val address = BigInt(if (name == "integer-split") 0x800d else 0x8ffd)
+    private val denyInitial = enabled && (highPageFault || repair || delegated)
+    private val programPcs = Set(sourcePc, sourcePc + 4, sourcePc + 8)
+    private val identities = mutable.Map.empty[MisalignOccurrence, ConsumerKey]
+    private val active = mutable.Map.empty[Key, MisalignOccurrence]
+    private val activeRob = mutable.Map.empty[Pointer, Set[MisalignOccurrence]]
+    private val destinations = mutable.Map.empty[(Boolean, BigInt), MisalignOccurrence]
+    private val accepted = mutable.Map.empty[MisalignOccurrence, (Pointer, BigInt)]
+    private val robAllocated = mutable.Set.empty[MisalignOccurrence]
+    private val lqAllocated = mutable.Map.empty[MisalignOccurrence, Pointer]
+    private val issued = mutable.Set.empty[MisalignOccurrence]
+    private val canceled = mutable.Set.empty[MisalignOccurrence]
+    private val done = mutable.Map.empty[MisalignOccurrence, Int].withDefaultValue(0)
+    private val retired = mutable.Map.empty[MisalignOccurrence, Int].withDefaultValue(0)
+    private val written = mutable.Map.empty[MisalignOccurrence, Int].withDefaultValue(0)
+    private val consumed = mutable.Set.empty[MisalignOccurrence]
+    private val terminalRows = mutable.Map.empty[MisalignOccurrence, Int].withDefaultValue(0)
+    private val mabEnqueues = mutable.Map.empty[MisalignOccurrence, Int].withDefaultValue(0)
+    private val mabWrites = mutable.Map.empty[MisalignOccurrence, Int].withDefaultValue(0)
+    private val fragments = mutable.Map.empty[MisalignOccurrence, Int].withDefaultValue(0)
+    private val exceptionSeen = mutable.Set.empty[MisalignOccurrence]
+    private val tlbPages = mutable.Set.empty[(Int, BigInt)]
+    private val highPageFaultSeen = mutable.Set.empty[MisalignOccurrence]
+    private val waiting = mutable.Set.empty[MisalignOccurrence]
+    private val fpRead = mutable.Set.empty[MisalignOccurrence]
+    private val fpReady = mutable.Set.empty[MisalignOccurrence]
+    private val parentWriteCycle = mutable.Map.empty[Int, Int]
+    private val fpWakeCycle = mutable.Map.empty[(Int, Int), Int]
+    private val cache = mutable.ArrayBuffer.empty[MisalignCache]
+    private val ptw = mutable.ArrayBuffer.empty[MisalignPtw]
+    private val scheduledPages = mutable.Set.empty[BigInt]
+    private val hintCycles = mutable.Set.empty[Int]
+    private val targets = mutable.ArrayBuffer.empty[(Int, BigInt)]
+    private var previousRc = Vector.fill[Option[MisalignOccurrence]](dut.memory.rcWrites.size)(None)
+    private var generation = 0
+    private var setupPc = BigInt(0x1000)
+    private var hsTraps = 0
+    private var reasonEffects = 0
+    private var prohibitEpcWrite = false
+
+    private def denied(occurrence: MisalignOccurrence): Boolean = denyInitial && occurrence.generation == 0
+    private def faults(occurrence: MisalignOccurrence): Boolean = highPageFault || denied(occurrence)
+    private def parent(occurrence: MisalignOccurrence): MisalignOccurrence = occurrence.copy(pc = sourcePc)
+    private def owner(rob: xiangshan.backend.rob.RobPtr, destination: UInt): Option[MisalignOccurrence] =
+      active.get(Key(pointer(rob), uint(destination)))
+    private def lq(value: xiangshan.mem.LqPtr): Pointer = Pointer(bool(value.flag), uint(value.value))
+    private def bytes(start: BigInt, count: Int): BigInt =
+      (0 until count).foldLeft(BigInt(0))((value, index) =>
+        value | ((((start + index) * 13 + 0x5b) & 0xff) << (8 * index)))
+    private val expectedData = bytes(address, 8)
+    private def expected(occurrence: MisalignOccurrence): BigInt =
+      if (occurrence.pc == sourcePc + 4 && !floating) (expectedData + 1) & ((BigInt(1) << 64) - 1)
+      else expectedData
+    private def olderOrEqual(left: Pointer, right: Pointer): Boolean =
+      if (left.flag == right.flag) left.value <= right.value else left.value > right.value
+    private def record(kind: String, occurrence: MisalignOccurrence, detail: String = ""): Unit =
+      event(kind, s"\"case\":\"$name\",\"pc\":${occurrence.pc},\"generation\":${occurrence.generation}" +
+        (if (detail.isEmpty) "" else "," + detail))
+    private def checkOwner(row: xiangshan.mem.Bundles.LsPipelineBundle): MisalignOccurrence = {
+      val occurrence = owner(row.uop.robIdx, row.uop.pdest).getOrElse(
+        throw new AssertionError("Memory transaction has no actual rename owner"))
+      assert(occurrence.pc == sourcePc && issued(occurrence) && !canceled(occurrence))
+      assert(lqAllocated(occurrence) == lq(row.uop.lqIdx), "MAB/replay changed the allocated LQ owner")
+      occurrence
+    }
+
+    override def edge(): Unit = {
+      dut.memory.response.foreach { reply => zero(reply.bits); reply.valid.poke(false.B) }
+      zero(dut.memory.pmp)
+      zero(view.tlbHint)
+      view.tlbHint.valid.poke(hintCycles(cycle).B)
+      view.tlbHint.bits.replay_all.poke(true.B)
+      dut.memory.ptw.resp.valid.poke(false.B)
+      for (attempt <- cache if attempt.accepted + 1 == cycle)
+        attempt.killed = bool(view.cacheS1Kill(attempt.lane))
+      for (attempt <- cache if attempt.accepted + 2 == cycle && !attempt.killed) {
+        val reply = dut.memory.response(attempt.lane)
+        reply.valid.poke(true.B); reply.bits.id.poke(attempt.id.U)
+        reply.bits.data.poke(bytes(attempt.address & ~BigInt(15), 16).U)
+      }
+      for (attempt <- cache if attempt.accepted + 3 == cycle)
+        dut.memory.response(attempt.lane).bits.data_delayed.poke(bytes(attempt.address & ~BigInt(15), 16).U)
+      ptw.filter(_.due == cycle).foreach { pending =>
+        zero(dut.memory.ptw.resp.bits)
+        val reply = dut.memory.ptw.resp.bits
+        val sector = reply.s1.pteidx.length
+        val index = (pending.vpn % sector).toInt
+        val pf = highPageFault && pending.vpn == 9
+        reply.memidx.is_ld.poke(true.B); reply.memidx.idx.poke(pending.lq.U)
+        reply.s1.entry.tag.poke((pending.vpn / sector).U)
+        reply.s1.entry.level.foreach(_.poke(0.U))
+        reply.s1.entry.ppn.poke((pending.vpn / sector).U)
+        reply.s1.entry.v.poke((!pf).B)
+        reply.s1.entry.perm.foreach { permission =>
+          permission.r.poke(true.B); permission.a.poke(true.B)
+          permission.d.poke(true.B); permission.u.poke(true.B)
+        }
+        reply.s1.addr_low.poke(index.U); reply.s1.pf.poke(pf.B)
+        reply.s1.valididx.zipWithIndex.foreach { case (bit, i) => bit.poke((i == index).B) }
+        reply.s1.pteidx.zipWithIndex.foreach { case (bit, i) => bit.poke((i == index).B) }
+        reply.s1.ppn_low.zipWithIndex.foreach { case (value, i) => value.poke(BigInt(i).U) }
+        dut.memory.ptw.resp.valid.poke(true.B)
+        assert(bool(dut.memory.ptw.resp.ready), "Directed PTW response must be accepted")
+        hintCycles += cycle + 4
+        event("misalign-ptw-reply", s"\"case\":\"$name\",\"vpn\":${pending.vpn},\"pf\":$pf")
+      }
+
+      if (bool(dut.io.fetchRequest.valid) && bool(dut.io.fetchReady) && !bool(dut.io.ifuRedirect.valid))
+        fetches(ftqPointer(dut.io.fetchRequest.bits.ftqIdx)) = uint(dut.io.fetchRequest.bits.startAddr)
+      if (bool(dut.io.csrResponse.valid)) csrResponses += 1
+      if (bool(dut.io.csrRequest.valid) && prohibitEpcWrite)
+        assert(uint(dut.io.csrRequest.bits) != 0x341, "Same-EPC recovery must not rewrite mepc")
+      if (bool(dut.io.backendRedirect.valid)) redirects += 1
+      if (bool(dut.io.ifuRedirect.valid)) {
+        targets += cycle -> uint(dut.io.ifuRedirect.bits.cfiUpdate.target)
+        event("misalign-ftq-redirect", s"\"case\":\"$name\",\"target\":${targets.last._2}")
+      }
+      if (bool(dut.io.mEntry)) { traps += 1; trapCycle = cycle }
+      if (bool(dut.io.hsEntry)) { hsTraps += 1; trapCycle = cycle }
+      if (bool(dut.memory.reasonEffect)) reasonEffects += 1
+      (Seq(dut.io.instruction) ++ dut.io.instructionTail).foreach { input =>
+        if (bool(input.valid) && bool(input.ready) && programPcs(uint(input.bits.pc))) {
+          val occurrence = MisalignOccurrence(uint(input.bits.pc), generation)
+          assert(!accepted.contains(occurrence), "A program occurrence was accepted twice")
+          accepted(occurrence) = ftqPointer(input.bits.ftqPtr) -> uint(input.bits.ftqOffset)
+        }
+      }
+      // A handler can reuse the flushed ROB tag before the source is retried.
+      // Retain history separately and rebuild live ownership for all simultaneous
+      // scalar renames, including multiple sources compressed into one ROB entry.
+      dut.memory.rename.filter(port => bool(port.valid)).map(port => pointer(port.bits.robIdx)).distinct.foreach { rob =>
+        active.keys.filter(_.rob == rob).toSeq.foreach(active.remove)
+        activeRob -= rob
+      }
+      dut.memory.rename.foreach { port =>
+        if (bool(port.valid)) {
+          if (bool(port.bits.rfWen)) destinations -= ((false, uint(port.bits.pdest)))
+          if (bool(port.bits.fpWen)) destinations -= ((true, uint(port.bits.pdest)))
+          val pc = uint(port.bits.pc)
+          if (programPcs(pc)) {
+            val occurrence = MisalignOccurrence(pc, generation)
+            assert(accepted.contains(occurrence) && !identities.contains(occurrence))
+            val identity = ConsumerKey(pointer(port.bits.robIdx), uint(port.bits.pdest), bool(port.bits.fpWen))
+            identities(occurrence) = identity
+            active(Key(identity.rob, identity.destination)) = occurrence
+            activeRob(identity.rob) = activeRob.getOrElse(identity.rob, Set.empty) + occurrence
+            destinations((identity.floating, identity.destination)) = occurrence
+            record("misalign-rename", occurrence, s"\"rob\":${identity.rob.value},\"rob_flag\":${identity.rob.flag},\"pdest\":${identity.destination}")
+          }
+        }
+      }
+      dut.io.robEnq.foreach { port =>
+        if (bool(port.valid) && bool(port.bits.first) && !bool(dut.memory.executionRedirect.valid))
+          activeRob.getOrElse(pointer(port.bits.robIdx), Set.empty).foreach(robAllocated += _)
+      }
+      view.allocation.foreach { port =>
+        if (bool(port.valid)) owner(port.bits.robIdx, port.bits.pdest).foreach { occurrence =>
+          assert(occurrence.pc == sourcePc && !lqAllocated.contains(occurrence))
+          lqAllocated(occurrence) = lq(port.bits.lqIdx)
+          record("misalign-lq-allocation", occurrence, s"\"lq\":${uint(port.bits.lqIdx.value)},\"lq_flag\":${bool(port.bits.lqIdx.flag)}")
+        }
+      }
+      dut.memory.issue.foreach { port =>
+        if (bool(port.valid)) {
+          val occurrence = owner(port.bits.uop.robIdx, port.bits.uop.pdest).get
+          assert(lqAllocated.get(occurrence).contains(lq(port.bits.uop.lqIdx)))
+          assert(robAllocated(occurrence) && !canceled(occurrence))
+          issued += occurrence
+        }
+      }
+      if (bool(dut.memory.executionRedirect.valid)) {
+        val redirect = dut.memory.executionRedirect.bits
+        val rob = pointer(redirect.robIdx)
+        active.values.toSet.foreach { (occurrence: MisalignOccurrence) =>
+          val identity = identities(occurrence)
+          val kill = !olderOrEqual(identity.rob, rob) || identity.rob == rob && uint(redirect.level) == 1
+          if (occurrence.generation == generation && retired(occurrence) == 0 && kill) canceled += occurrence
+        }
+      }
+      view.enqueued.foreach { port =>
+        if (bool(port.valid)) {
+          val occurrence = checkOwner(port.bits)
+          port.bits.fullva.expect(address.U)
+          mabEnqueues(occurrence) += 1
+          record("misalign-mab-enqueue", occurrence, s"\"fullva\":${uint(port.bits.fullva)}")
+        }
+      }
+      if (bool(view.owner.valid)) view.owner.bits.fullva.expect(address.U)
+      if (bool(view.request.valid)) {
+        val occurrence = checkOwner(view.request.bits)
+        fragments(occurrence) += 1
+        record("misalign-fragment", occurrence, s"\"fullva\":${uint(view.request.bits.fullva)},\"vaddr\":${uint(view.request.bits.vaddr)}")
+      }
+      if (bool(view.response.valid)) checkOwner(view.response.bits)
+      view.attempt.zipWithIndex.foreach { case (port, lane) =>
+        if (bool(port.valid)) {
+          val occurrence = checkOwner(port.bits)
+          if (denied(occurrence) && bool(port.bits.isFrmMisAlignBuf))
+            dut.memory.requests(lane).valid.expect(false.B)
+          if (bool(dut.memory.requests(lane).valid)) {
+            val request = dut.memory.requests(lane).bits
+            cache += MisalignCache(lane, cycle, uint(request.vaddr), uint(request.id), occurrence)
+          }
+        } else dut.memory.requests(lane).valid.expect(false.B)
+      }
+      dut.memory.ptw.req.foreach { request =>
+        if (bool(request.valid) && bool(request.ready)) {
+          val vpn = uint(request.bits.vpn)
+          assert(translated && Set(BigInt(8), BigInt(9))(vpn), "PTW escaped the planned load pages")
+          if (scheduledPages.add(vpn)) ptw += MisalignPtw(cycle + 16, vpn, uint(request.bits.memidx.idx))
+        }
+      }
+      view.tlbRequest.foreach { port =>
+        if (bool(port.valid)) {
+          val sources = activeRob.getOrElse(pointer(port.bits.debug.robIdx), Set.empty).filter(_.pc == sourcePc)
+          assert(sources.size == 1, "Actual TLB request lost its unique load occurrence")
+          val occurrence = sources.head
+          port.bits.memidx.idx.expect(lqAllocated(occurrence).value.U)
+          tlbPages += occurrence.generation -> (uint(port.bits.vaddr) >> 12)
+        }
+      }
+      view.tlbResponse.foreach { port =>
+        if (bool(port.valid) && bool(port.bits.excp.head.pf.ld)) {
+          val sources = activeRob.getOrElse(pointer(port.bits.debug.robIdx), Set.empty).filter(_.pc == sourcePc)
+          assert(highPageFault && sources.size == 1)
+          port.bits.fullva.expect(0x9000.U)
+          port.bits.memidx.idx.expect(lqAllocated(sources.head).value.U)
+          highPageFaultSeen += sources.head
+        }
+      }
+      view.queueWrite.foreach { port =>
+        if (bool(port.valid)) {
+          val occurrence = checkOwner(port.bits)
+          if (bool(port.bits.updateAddrValid) && !port.bits.rep_info.cause.exists(bool)) {
+            terminalRows(occurrence) += 1
+            assert(terminalRows(occurrence) == 1, "Original LQ owner received multiple terminal rows")
+            record("misalign-lq-terminal", occurrence, s"\"fullva\":${uint(port.bits.fullva)}")
+          }
+        }
+      }
+      if (bool(view.exception.valid)) owner(view.exception.bits.uop.robIdx, view.exception.bits.uop.pdest).foreach { occurrence =>
+        val cause = if (highPageFault) 13 else if (delegated) 25 else 24
+        if (faults(occurrence) && bool(view.exception.bits.uop.exceptionVec(cause))) {
+          assert(lqAllocated(occurrence) == lq(view.exception.bits.uop.lqIdx))
+          view.exception.bits.fullva.expect((if (highPageFault) BigInt(0x9000) else address).U)
+          exceptionSeen += occurrence
+        }
+      }
+      if (bool(view.writeback.valid)) {
+        val occurrence = owner(view.writeback.bits.uop.robIdx, view.writeback.bits.uop.pdest).get
+        mabWrites(occurrence) += 1
+        assert(mabWrites(occurrence) == 1 && !canceled(occurrence))
+      }
+      dut.memory.completion.foreach { port =>
+        if (bool(port.valid)) {
+          val occurrence = owner(port.bits.uop.robIdx, port.bits.uop.pdest).get
+          assert(occurrence.pc == sourcePc && !canceled(occurrence))
+          assert(lqAllocated(occurrence) == lq(port.bits.uop.lqIdx))
+          done(occurrence) += 1
+          assert(done(occurrence) == 1 && terminalRows(occurrence) == 1,
+            "Final Backend WB must follow one real LQ terminal publication")
+          val actual = port.bits.uop.exceptionVec.zipWithIndex.collect { case (bit, index) if bool(bit) => index }.toSet
+          if (faults(occurrence)) {
+            val cause = if (highPageFault) 13 else if (delegated) 25 else 24
+            assert(actual(cause) && actual.subsetOf(Set(cause) ++ (if (denied(occurrence)) Set(24 + privilege) else Set.empty[Int])))
+            port.bits.uop.rfWen.expect(false.B); port.bits.uop.fpWen.expect(false.B)
+          } else {
+            assert(actual.isEmpty)
+            port.bits.data.expect(expectedData.U)
+            port.bits.uop.rfWen.expect((!floating).B); port.bits.uop.fpWen.expect(floating.B)
+          }
+          record("misalign-final-wb", occurrence, s"\"data\":${uint(port.bits.data)},\"exceptions\":[${actual.toSeq.sorted.mkString(",")}]")
+        }
+      }
+      dut.memory.registerWrites.foreach { port =>
+        if (bool(port.valid)) destinations.get((bool(port.floating), uint(port.destination))).foreach { occurrence =>
+          assert(!faults(occurrence) && !canceled(occurrence), "Rejected or canceled occurrence published a register")
+          port.data.expect(expected(occurrence).U)
+          written(occurrence) += 1
+          assert(written(occurrence) == 1)
+          if (occurrence.pc == sourcePc) parentWriteCycle(occurrence.generation) = cycle
+        }
+      }
+      dut.memory.rcWrites.zipWithIndex.foreach { case (port, index) =>
+        if (bool(port.valid)) previousRc(index).foreach { occurrence =>
+          assert(!faults(occurrence) && !canceled(occurrence), "Rejected occurrence reached the register cache")
+          port.data.expect(expected(occurrence).U)
+        }
+      }
+      previousRc = dut.memory.rcWrites.map(port => if (bool(port.sourceValid))
+        destinations.get((false, uint(port.sourceDestination))) else None).toVector
+      dut.memory.bypass.foreach { port =>
+        if (bool(port.valid) && bool(port.intWen)) destinations.get((false, uint(port.destination))).foreach { occurrence =>
+          assert(!faults(occurrence) && !canceled(occurrence), "Rejected occurrence reached the integer bypass")
+        }
+      }
+      dut.memory.fpWbWakeup.foreach { port =>
+        if (bool(port.valid) && bool(port.floating)) destinations.get((true, uint(port.destination))).foreach { occurrence =>
+          if (occurrence.pc == sourcePc) {
+            assert(!faults(occurrence) && !canceled(occurrence))
+            fpWakeCycle((occurrence.generation, uint(port.queue).toInt)) = cycle
+          }
+        }
+      }
+      for ((ports, phase) <- Seq(dut.memory.iqEntries -> "entry", dut.memory.iqEnqueue -> "enqueue",
+        dut.memory.iqDequeue -> "dequeue", dut.memory.dataInput -> "read")) ports.foreach { port =>
+        if (bool(port.valid)) owner(port.rob, port.destination).foreach { occurrence =>
+          if (occurrence.pc != sourcePc && !canceled(occurrence)) {
+            val producer = identities(parent(occurrence))
+            port.sourceRegister(0).expect(producer.destination.U)
+            port.sourceFloating(0).expect(floating.B)
+            if ((phase == "entry" || phase == "enqueue") && !bool(port.sourceReady(0))) waiting += occurrence
+            if (floating && (phase == "entry" || phase == "enqueue") && bool(port.sourceReady(0))) {
+              assert(!faults(occurrence) && parentWriteCycle.contains(occurrence.generation) &&
+                fpWakeCycle.contains((occurrence.generation, uint(port.queue).toInt)), "FP readiness lacked real parent WB/wakeup")
+              fpReady += occurrence
+            }
+            if (phase == "read" && bool(port.ready) && floating) {
+              assert(!faults(occurrence) && fpReady(occurrence) && parentWriteCycle(occurrence.generation) < cycle)
+              port.registerRead(0).expect(true.B)
+              fpRead += occurrence
+            }
+          }
+        }
+      }
+      dut.memory.execution.foreach { port =>
+        if (bool(port.valid)) owner(port.bits.rob, port.bits.destination).foreach { occurrence =>
+          assert(occurrence.pc != sourcePc && !faults(occurrence) && !canceled(occurrence))
+          assert(done(parent(occurrence)) == 1, "Dependent executed before final assembled load completion")
+          port.bits.operand.expect(expectedData.U)
+          if (floating) assert(fpRead(occurrence), "FP consumer did not read the published physical register")
+          consumed += occurrence
+        }
+      }
+      dut.io.robRetire.foreach { port =>
+        if (bool(port.valid)) activeRob.getOrElse(pointer(port.bits), Set.empty).foreach { occurrence =>
+            assert(robAllocated(occurrence) && !faults(occurrence) && !canceled(occurrence))
+            assert(written(occurrence) == 1, "Occurrence retired before its register publication")
+            retired(occurrence) += 1
+            assert(retired(occurrence) == 1)
+        }
+      }
+      dut.memory.uncacheRequest.expect(false.B)
+      dut.clock.step(); cycle += 1
+    }
+
+    private def setRegister(reg: Int, value: BigInt): Unit = {
+      def materialize(number: BigInt): Seq[BigInt] = {
+        if (number >= -2048 && number <= 2047) Seq(addi(reg, 0, number.toInt))
+        else {
+          val tail = (number & 0xfff).toInt
+          val low = if (tail >= 2048) tail - 4096 else tail
+          materialize((number - low) >> 12) ++ Seq((BigInt(12) << 20) | (BigInt(reg) << 15) |
+            (BigInt(1) << 12) | (BigInt(reg) << 7) | 0x13) ++
+            (if (low == 0) Seq.empty else Seq(addi(reg, reg, low)))
+        }
+      }
+      materialize(value).grouped(dut.DecodeWidth).foreach { words => packet(setupPc, words); setupPc += 0x40; idle(16) }
+    }
+    private def writeCSR(address: Int, value: BigInt, flush: Boolean = false): Unit = {
+      setRegister(6, value); csr(setupPc, csrWrite(address, 6), flush); setupPc += 0x40
+    }
+    private def program(): Unit = {
+      val source = (BigInt(1) << 15) | (BigInt(3) << 12) | (BigInt(10) << 7) | (if (floating) 7 else 3)
+      val integerConsumer = if (floating) (BigInt(0x71) << 25) | (BigInt(10) << 15) | (BigInt(11) << 7) | 0x53
+        else addi(11, 10, 1)
+      val floatingConsumer = if (floating) (BigInt(0x11) << 25) | (BigInt(10) << 20) |
+        (BigInt(10) << 15) | (BigInt(11) << 7) | 0x53
+        else (BigInt(0x79) << 25) | (BigInt(10) << 15) | (BigInt(11) << 7) | 0x53
+      packet(sourcePc, Seq(source, integerConsumer, floatingConsumer), tag = true)
+    }
+    private def finishAllowed(): Unit = {
+      val occurrences = programPcs.map(MisalignOccurrence(_, generation))
+      until("assembled load and both real consumers retire", 6000)(occurrences.forall(retired(_) == 1))
+      until("real MAB and LQ drain")(bool(dut.memory.queueEmpty) && !bool(view.full))
+      idle(16)
+      val producer = MisalignOccurrence(sourcePc, generation)
+      assert(done(producer) == 1 && terminalRows(producer) == 1 && mabEnqueues(producer) == 1 && mabWrites(producer) == 1)
+      assert(fragments(producer) >= 2)
+      assert((occurrences - producer).subsetOf(consumed) && (occurrences - producer).subsetOf(waiting))
+      if (floating) assert((occurrences - producer).subsetOf(fpRead))
+    }
+    def runMisaligned(): Unit = {
+      zero(view.tlbHint); reset()
+      event("misalign-case", s"\"case\":\"$name\",\"enabled\":$enabled,\"address\":$address")
+      setRegister(1, address)
+      writeCSR(0x305, 0x6000); writeCSR(0x105, 0x7000)
+      if (enabled) {
+        writeCSR(0x890, 0x8000, flush = true)
+        writeCSR(0x891, if (denyInitial) 0x9000 else 0xa000, flush = true)
+        writeCSR(0x880, 10, flush = true)
+        writeCSR(0xbc4, if (privilege == 1) 1 else 2, flush = true)
+        writeCSR(0x8b3, 7, flush = true)
+      }
+      if (translated) writeCSR(0x180, (BigInt(8) << 60) | 1, flush = true)
+      if (delegated) writeCSR(0x302, BigInt(1) << 25)
+      writeCSR(0x341, sourcePc)
+      writeCSR(0x300, (BigInt(privilege) << 11) | (BigInt(1) << 13))
+      val beforeReturn = targets.size
+      packet(setupPc, Seq(BigInt(0x30200073))); setupPc += 0x40
+      until("real MRET enters source mode")(uint(dut.io.mode) == privilege && targets.drop(beforeReturn).exists(_._2 == sourcePc))
+      idle(16)
+      dut.memory.sourcePrivilege.expect(privilege.U)
+      program()
+      val original = MisalignOccurrence(sourcePc, 0)
+      if (!faults(original)) finishAllowed()
+      else {
+        until("precise nonaligned terminal trap", 6000)(traps + hsTraps == 1)
+        until("trap reaches real FTQ recovery")(targets.exists(_._2 == (if (delegated) 0x7000 else 0x6000)))
+        idle(12)
+        val cause = if (highPageFault) 13 else if (delegated) 25 else 24
+        val tval = if (highPageFault) BigInt(0x9000) else address
+        if (delegated) {
+          dut.io.scause.expect(cause.U); dut.io.sepc.expect(sourcePc.U); dut.memory.supervisorTval.expect(tval.U)
+          assert(hsTraps == 1 && traps == 0)
+        } else {
+          dut.io.mcause.expect(cause.U); dut.io.mepc.expect(sourcePc.U); dut.io.mtval.expect(tval.U)
+        }
+        assert(done(original) == 1 && retired(original) == 0 && written(original) == 0)
+        assert(terminalRows(original) == 1 && exceptionSeen(original) && consumed.isEmpty)
+        assert(mabEnqueues(original) == 1 && fragments(original) > 0 && tlbPages((0, BigInt(9))))
+        if (highPageFault) assert(highPageFaultSeen(original) && scheduledPages == Set(BigInt(8), BigInt(9)))
+        val originalProgram = programPcs.map(MisalignOccurrence(_, 0))
+        assert(originalProgram.subsetOf(identities.keySet) && originalProgram.forall(written(_) == 0))
+        assert((originalProgram - original).subsetOf(waiting), "Rejected producer's real consumers were not observed waiting")
+        if (enabled) dut.memory.reason.expect((if (highPageFault) 7 else 2).U)
+        assert(reasonEffects == (if (enabled && !highPageFault) 1 else 0))
+        until("faulted owner leaves real LQ and MAB")(bool(dut.memory.queueEmpty) && !bool(view.full))
+        idle(16)
+        if (repair) {
+          dut.io.mode.expect(3.U)
+          prohibitEpcWrite = true
+          setupPc = 0x6000
+          writeCSR(0x891, 0xa000, flush = true)
+          dut.memory.mirror(3).expect(0xa000.U)
+          dut.io.mepc.expect(sourcePc.U)
+          val beforeRetryReturn = targets.size
+          packet(setupPc, Seq(BigInt(0x30200073)))
+          until("MRET recovers the unchanged source EPC")(uint(dut.io.mode) == 0 &&
+            targets.drop(beforeRetryReturn).exists(_._2 == sourcePc))
+          idle(16)
+          generation = 1
+          program()
+          finishAllowed()
+          assert(identities.contains(original) && identities.contains(MisalignOccurrence(sourcePc, 1)))
+          assert(retired(original) == 0 && traps == 1 && reasonEffects == 1)
+          dut.io.mepc.expect(sourcePc.U)
+          record("misalign-same-epc-retry-complete", MisalignOccurrence(sourcePc, 1), "\"mepc_rewritten\":false")
+        }
+      }
+      dut.io.criticalErrorState.expect(false.B)
+      event("misalign-case-complete", s"\"case\":\"$name\",\"traps\":${traps + hsTraps},\"generations\":${generation + 1}")
+    }
+  }
+
   it should "block denied data while preserving the actual ROB exception completion" in {
-    val root = Paths.get(sys.props("l01.runRoot")).toRealPath()
+    val root = Paths.get(sys.props(if (misalignCases) "l04.runRoot" else "l01.runRoot")).toRealPath()
     require(Paths.get("").toRealPath() == root, "Use the dedicated L01 run directory")
     val path = root.resolve(if (enabled) "backend-enabled" else "backend-disabled")
     require(!Files.exists(path)); Files.createDirectory(path)
@@ -1828,7 +2302,8 @@ class FDILoadPermissionBackendTest(val replayCases: Boolean = false) extends Any
     utility.ChiselDB.init(options.EnableChiselDB && !options.FPGAPlatform)
     val workspace = new Workspace(path.resolve("compiled").toString)
     workspace.reset()
-    val module = workspace.elaborateGeneratedModule(() => new FDILoadPermissionBackendHarness(replayServices = replayCases))
+    val module = workspace.elaborateGeneratedModule(() => new FDILoadPermissionBackendHarness(
+      replayServices = replayCases, misalignServices = misalignCases))
     workspace.generateAdditionalSources()
     val common = CommonCompilationSettings(availableParallelism =
       CommonCompilationSettings.AvailableParallelism.UpTo(Runtime.getRuntime.availableProcessors()))
@@ -1838,7 +2313,16 @@ class FDILoadPermissionBackendTest(val replayCases: Boolean = false) extends Any
     simulation.runElaboratedModule(module) { elaborated =>
       val driver = new Driver(elaborated.wrapped)
       try {
-        if (scenario == "replay") {
+        if (scenario == "misalign") {
+          val cases = Seq("integer-split", "floating-cross-page", "floating-high-page-pf") ++
+            (if (enabled) Seq("same-epc-bound-repair", "supervisor-delegated") else Seq.empty)
+          for (name <- cases) {
+            val misaligned = new MisalignDriver(elaborated.wrapped, name)
+            try misaligned.runMisaligned()
+            finally driver.events ++= misaligned.events
+          }
+          println(s"L04_BACKEND_MISALIGN_PASS enabled=$enabled cases=${cases.size} actual_mab=true actual_consumers=true same_epc=${enabled}")
+        } else if (scenario == "replay") {
           var cases = 0
           for (floating <- Seq(false, true); denied <- (if (enabled) Seq(false, true) else Seq(false))) {
             val consumer = new ConsumerDriver(elaborated.wrapped, floating, denied)

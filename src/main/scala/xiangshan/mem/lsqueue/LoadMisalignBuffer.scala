@@ -30,7 +30,7 @@ import xiangshan.backend.fu.fpu.FPU
 import xiangshan.backend.rob.RobLsqIO
 import xiangshan.mem.Bundles._
 import xiangshan.backend.rob.RobPtr
-import xiangshan.backend.Bundles.{MemExuOutput, DynInst}
+import xiangshan.backend.Bundles.{MemExuOutput, DynInst, connectSamePort}
 import xiangshan.backend.fu.FuConfig.LduCfg
 import xiangshan.cache.mmu.HasTlbConst
 import xiangshan.cache._
@@ -167,7 +167,7 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
   //  - s_resp:   Responds to a split load access request
   //  - s_comb_wakeup_rep: Merge the data and issue a wakeup load
   //  - s_wb: writeback yo rob/vecMergeBuffer
-  val s_idle :: s_split :: s_req :: s_resp :: s_comb_wakeup_rep :: s_wb :: Nil = Enum(6)
+  val s_idle :: s_split :: s_req :: s_resp :: s_comb_wakeup_rep :: s_wb :: s_terminal_req :: s_terminal_resp :: Nil = Enum(8)
   val bufferState = RegInit(s_idle)
   val splitLoadReqs = RegInit(VecInit(List.fill(maxSplitNum)(0.U.asTypeOf(new LsPipelineBundle))))
   val splitLoadResp = RegInit(VecInit(List.fill(maxSplitNum)(0.U.asTypeOf(new LqWriteBundle))))
@@ -186,9 +186,29 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
   val globalMMIO = RegInit(false.B)
   val globalNC   = RegInit(false.B)
 
+  val probeOwner = if (HasFDI) req.fdiLoadMode.get === FDILoadMode.Probe else false.B
+  // A denied owner retains its original VA; only the final standard fault may select a fragment VA.
+  val terminalFullva = Reg(UInt(XLEN.W))
+  val responseOwner = io.splitLoadResp.valid && req_valid &&
+    io.splitLoadResp.bits.uop.robIdx === req.uop.robIdx &&
+    io.splitLoadResp.bits.uop.lqIdx === req.uop.lqIdx &&
+    io.splitLoadResp.bits.uop.uopIdx === req.uop.uopIdx && !req.uop.robIdx.needFlush(io.redirect)
+  val responseModeMatches = if (HasFDI) {
+    io.splitLoadResp.bits.fdiLoadMode.get === Mux(probeOwner, FDILoadMode.Probe, FDILoadMode.Normal)
+  } else true.B
+  // s_resp owns exactly one fragment, including any internal fast replay of that fragment.
+  val fragmentResponse = responseOwner && bufferState === s_resp && responseModeMatches &&
+    !io.splitLoadResp.bits.misalignNeedWakeUp && io.splitLoadResp.bits.isFinalSplit === curPtr(0)
+  val wakeupResponse = responseOwner && bufferState === s_wb && needWakeUpWB &&
+    io.splitLoadResp.bits.misalignNeedWakeUp
+  val terminalResponse = responseOwner && bufferState === s_terminal_resp &&
+    io.splitLoadResp.bits.isFrmMisAlignBuf && io.splitLoadResp.bits.hasException &&
+    (if (HasFDI) io.splitLoadResp.bits.fdiLoadMode.get === FDILoadMode.Terminal else true.B)
+
   val hasException = io.splitLoadResp.bits.vecActive &&
     ExceptionNO.selectByFu(io.splitLoadResp.bits.uop.exceptionVec, LduCfg).asUInt.orR || TriggerAction.isDmode(io.splitLoadResp.bits.uop.trigger)
   val isUncache = io.splitLoadResp.bits.mmio || io.splitLoadResp.bits.nc
+  val nativeUncacheTerminal = isUncache && !req.isvec && !LSUOpType.isHlv(req.uop.fuOpType)
   needWakeUpReqsWire := false.B
   switch(bufferState) {
     is (s_idle) {
@@ -208,12 +228,20 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
     }
 
     is (s_resp) {
-      when (io.splitLoadResp.valid) {
+      when (fragmentResponse) {
         val clearOh = UIntToOH(curPtr)
-        when (hasException || isUncache) {
+        when (probeOwner) {
+          when (hasException || isUncache || !io.splitLoadResp.bits.rep_info.need_rep) {
+            bufferState := s_terminal_req
+            globalException := true.B
+            needWakeUpWB := false.B
+          } .otherwise {
+            bufferState := s_req
+          }
+        } .elsewhen (hasException || isUncache) {
           // commit directly when exception ocurs
           // if any split load reaches uncache space, delegate to software loadAddrMisaligned exception
-          bufferState := s_wb
+          bufferState := Mux(nativeUncacheTerminal, s_terminal_req, s_wb)
           globalException := hasException
           globalUncache := isUncache
           globalMMIO := io.splitLoadResp.bits.mmio
@@ -274,6 +302,23 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
       }
 
     }
+
+    is (s_terminal_req) {
+      when (io.splitLoadReq.fire) { bufferState := s_terminal_resp }
+    }
+    is (s_terminal_resp) {
+      when (terminalResponse) {
+        bufferState := s_idle
+        req_valid := false.B
+        curPtr := 0.U
+        unSentLoads := 0.U
+        globalException := false.B
+        globalUncache := false.B
+        globalMMIO := false.B
+        globalNC := false.B
+        needWakeUpWB := false.B
+      }
+    }
   }
 
   val alignedType = Mux(req.isvec, req.alignedType(1,0), req.uop.fuOpType(1, 0))
@@ -303,14 +348,28 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
       assert(false.B, s"There should be no non-aligned access that does not cross 16Byte boundaries.")
     } .otherwise {
       // split this unaligned load into `maxSplitNum` aligned loads
-      unSentLoads := Fill(maxSplitNum, 1.U(1.W))
-      curPtr := 0.U
+      unSentLoads := Mux(probeOwner, "b10".U, Fill(maxSplitNum, 1.U(1.W)))
+      curPtr := Mux(probeOwner, 1.U, 0.U)
       lowAddrLoad.uop := req.uop
       lowAddrLoad.uop.exceptionVec(loadAddrMisaligned) := false.B
       lowAddrLoad.fullva := req.fullva
+      lowAddrLoad.vaNeedExt := req.vaNeedExt
       highAddrLoad.uop := req.uop
       highAddrLoad.uop.exceptionVec(loadAddrMisaligned) := false.B
       highAddrLoad.fullva := req.fullva
+      highAddrLoad.vaNeedExt := req.vaNeedExt
+      if (HasFDI) {
+        for (fragment <- Seq(lowAddrLoad, highAddrLoad)) {
+          fragment.fdiSourcePrivilege.get := req.fdiSourcePrivilege.get
+          fragment.fdiSourceVirtual.get := req.fdiSourceVirtual.get
+          fragment.fdiLoadMode.get := req.fdiLoadMode.get
+          when (probeOwner) {
+            fragment.uop.exceptionVec := 0.U.asTypeOf(ExceptionVec())
+            fragment.uop.rfWen := false.B
+            fragment.uop.fpWen := false.B
+          }
+        }
+      }
 
       switch (alignedType(1, 0)) {
         is (LB) {
@@ -488,13 +547,20 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
         }
       }
 
+      // Derive the high architectural portion after PMM, before registering the request.
+      // The low fullva keeps the original offset used by the native GPaddr calculation.
+      when (!req.isvec && !LSUOpType.isHlv(req.uop.fuOpType) && !req.vaNeedExt) {
+        highAddrLoad.fullva := req.fullva + (16.U(5.W) - req.fullva(3, 0))
+      }
       splitLoadReqs(0) := lowAddrLoad
       splitLoadReqs(1) := highAddrLoad
     }
     exceptionVec := 0.U.asTypeOf(exceptionVec.cloneType)
   }
 
-  io.splitLoadReq.valid := req_valid && (bufferState === s_req || bufferState === s_comb_wakeup_rep && needWakeUpReqsWire && !req.isvec)
+  io.splitLoadReq.valid := req_valid && !req.uop.robIdx.needFlush(io.redirect) &&
+    (bufferState === s_req || bufferState === s_comb_wakeup_rep && needWakeUpReqsWire && !req.isvec ||
+      bufferState === s_terminal_req)
   io.splitLoadReq.bits  := splitLoadReqs(curPtr)
   io.splitLoadReq.bits.isvec  := req.isvec
   io.splitLoadReq.bits.misalignNeedWakeUp  := needWakeUpReqsWire
@@ -506,11 +572,52 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
   io.splitLoadReq.bits.uop.fuOpType := Mux(req.isvec, req.uop.fuOpType, Cat(reqIsHlv, reqIsHlvx, 0.U(1.W), splitLoadReqs(curPtr).uop.fuOpType(1, 0)))
   io.splitLoadReq.bits.alignedType  := Mux(req.isvec, splitLoadReqs(curPtr).uop.fuOpType(1, 0), req.alignedType)
 
-  when (io.splitLoadResp.valid) {
+  // Final exception publication uses the same reserved LDU slot in both feature states.
+  when (bufferState === s_terminal_req) {
+    connectSamePort(io.splitLoadReq.bits, req)
+    io.splitLoadReq.bits.fullva := terminalFullva
+    io.splitLoadReq.bits.vaddr := terminalFullva(VAddrBits - 1, 0)
+    io.splitLoadReq.bits.vaNeedExt := Mux(probeOwner, false.B, req.vaNeedExt)
+    io.splitLoadReq.bits.fdiLoadMode.foreach(_ := FDILoadMode.Terminal)
+    io.splitLoadReq.bits.uop.exceptionVec := exceptionVec
+    io.splitLoadReq.bits.uop.rfWen := false.B
+    io.splitLoadReq.bits.uop.fpWen := false.B
+    io.splitLoadReq.bits.data := 0.U
+    io.splitLoadReq.bits.hasException := true.B
+    io.splitLoadReq.bits.isFrmMisAlignBuf := true.B
+    io.splitLoadReq.bits.isMisalign := false.B
+    io.splitLoadReq.bits.isFinalSplit := false.B
+    io.splitLoadReq.bits.misalignNeedWakeUp := false.B
+  }
+  if (HasFDI) {
+    when (canEnqValid && select_req_bit.fdiLoadMode.get === FDILoadMode.Probe) {
+      assert(!select_req_bit.vaNeedExt && !select_req_bit.isvec,
+        "A deferred scalar denial must retain its complete original effective address")
+    }
+  }
+
+  when (fragmentResponse) {
     val resp = io.splitLoadResp.bits
     splitLoadResp(curPtr) := io.splitLoadResp.bits
-    when (isUncache) {
+    when (probeOwner) {
+      if (HasFDI) {
+        when (hasException || isUncache || !resp.rep_info.need_rep) {
+          unSentLoads := 0.U
+          exceptionVec := req.uop.exceptionVec
+          terminalFullva := req.fullva
+          when (isUncache) {
+            exceptionVec := 0.U.asTypeOf(ExceptionVec())
+            exceptionVec(loadAddrMisaligned) := true.B
+            terminalFullva := req.fullva
+          } .elsewhen (hasException) {
+            exceptionVec := ExceptionNO.selectByFu(resp.uop.exceptionVec, LduCfg)
+            terminalFullva := resp.fullva
+          }
+        }
+      }
+    } .elsewhen (isUncache) {
       unSentLoads := 0.U
+      terminalFullva := req.fullva
       exceptionVec := ExceptionNO.selectByFu(0.U.asTypeOf(exceptionVec.cloneType), LduCfg)
       // delegate to software
       exceptionVec(loadAddrMisaligned) := true.B
@@ -545,11 +652,12 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
 
   }
 
-  io.writeBack.valid := req_valid && (bufferState === s_wb) && (io.splitLoadResp.valid && io.splitLoadResp.bits.misalignNeedWakeUp || globalUncache || globalException) && !io.loadOutValid && !req.isvec
+  io.writeBack.valid := req_valid && (bufferState === s_wb) && (wakeupResponse || globalUncache || globalException) && !io.loadOutValid && !req.isvec
   io.writeBack.bits.uop := req.uop
   io.writeBack.bits.uop.exceptionVec := DontCare
   LduCfg.exceptionOut.map(no => io.writeBack.bits.uop.exceptionVec(no) := (globalUncache || globalException) && exceptionVec(no))
   io.writeBack.bits.uop.rfWen := !globalException && !globalUncache && req.uop.rfWen
+  io.writeBack.bits.uop.fpWen := !globalException && !globalUncache && req.uop.fpWen
   io.writeBack.bits.uop.fuType := FuType.ldu.U
   io.writeBack.bits.uop.flushPipe := false.B
   io.writeBack.bits.uop.replayInst := false.B
@@ -602,6 +710,7 @@ class LoadMisalignBuffer(implicit p: Parameters) extends XSModule
     unSentLoads := 0.U
     globalException := false.B
     globalUncache := false.B
+    needWakeUpWB := false.B
 
     globalMMIO := false.B
     globalNC   := false.B

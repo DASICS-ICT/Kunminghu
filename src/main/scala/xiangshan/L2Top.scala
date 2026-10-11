@@ -297,6 +297,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
 
       /* l2 tlb */
       io.l2_tlb_req.req.bits := DontCare
+      io.l2_tlb_req.req.bits.fullvaKind := xiangshan.cache.mmu.TlbFullvaKind.Raw
       io.l2_tlb_req.req.valid := l2.io.l2_tlb_req.req.valid
       io.l2_tlb_req.resp.ready := l2.io.l2_tlb_req.resp.ready
       io.l2_tlb_req.req.bits.vaddr := l2.io.l2_tlb_req.req.bits.vaddr
@@ -345,6 +346,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
 
       io.l2_tlb_req.req.valid := false.B
       io.l2_tlb_req.req.bits := DontCare
+      io.l2_tlb_req.req.bits.fullvaKind := xiangshan.cache.mmu.TlbFullvaKind.Raw
       io.l2_tlb_req.req_kill := DontCare
       io.l2_tlb_req.resp.ready := true.B
       io.perfEvents := DontCare

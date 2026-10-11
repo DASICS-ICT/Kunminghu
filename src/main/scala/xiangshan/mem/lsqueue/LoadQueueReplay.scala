@@ -551,7 +551,9 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     replay_req(i).valid             := s2_oldestSel(i).valid
     replay_req(i).bits              := DontCare
     replay_req(i).bits.uop          := s2_replayUop
+    replay_req(i).bits.hasException := false.B
     if (HasFDI) {
+      replay_req(i).bits.fdiLoadMode.get := FDILoadMode.Normal
       replay_req(i).bits.fullva := s2_fdiFullva.get
       replay_req(i).bits.fdiSourcePrivilege.get := s2_fdiSourcePrivilege.get
       replay_req(i).bits.fdiSourceVirtual.get := s2_fdiSourceVirtual.get

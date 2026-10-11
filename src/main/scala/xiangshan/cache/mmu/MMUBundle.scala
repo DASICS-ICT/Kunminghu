@@ -524,9 +524,17 @@ class MemBlockidxBundle(implicit p: Parameters) extends TlbBundle {
   val idx = UInt(log2Ceil(VirtualLoadQueueMaxStoreQueueSize).W)
 }
 
+object TlbFullvaKind {
+  val Raw = 0.U(2.W)
+  val Effective = 1.U(2.W)
+  val Scalar = 2.U(2.W)
+}
+
 class TlbReq(implicit p: Parameters) extends TlbBundle {
   val vaddr = Output(UInt(VAddrBits.W))
   val fullva = Output(UInt(XLEN.W))
+  // Effective addresses have already undergone PMM; Scalar permits host replay representation recovery.
+  val fullvaKind = Output(UInt(2.W))
   val checkfullva = Output(Bool())
   val cmd = Output(TlbCmd())
   val hyperinst = Output(Bool())

@@ -613,6 +613,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
     tlb_req_arb.io.in(i).bits.kill := false.B
     tlb_req_arb.io.in(i).bits.no_translate := false.B
     tlb_req_arb.io.in(i).bits.fullva := 0.U
+    tlb_req_arb.io.in(i).bits.fullvaKind := xiangshan.cache.mmu.TlbFullvaKind.Raw
     tlb_req_arb.io.in(i).bits.checkfullva := false.B
     tlb_req_arb.io.in(i).bits.memidx := DontCare
     tlb_req_arb.io.in(i).bits.debug := DontCare

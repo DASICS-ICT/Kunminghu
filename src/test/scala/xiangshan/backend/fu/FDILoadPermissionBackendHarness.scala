@@ -6,7 +6,7 @@ import chisel3._
 import chisel3.util._
 import chisel3.util.experimental.BoringUtils.{bore => observe}
 import org.chipsalliance.cde.config.Parameters
-import utility.DelayN
+import utility.{DelayN, SignExt, ZeroExt}
 import xiangshan._
 import xiangshan.backend.BackendInlinedImp
 import xiangshan.backend.Bundles.{DynInst, MemExuInput, MemExuOutput}
@@ -39,9 +39,17 @@ class FDILoadConsumerPhase(implicit p: Parameters) extends XSBundle {
 
 // Real load and queue instances replace the inherited idle memory inputs.
 // Every observation below reads production state; no tap drives it back.
-class FDILoadPermissionBackendHarness(val replayServices: Boolean = false)(implicit p: Parameters) extends UserTimerDeliveryHarness {
+class FDILoadPermissionBackendHarness(
+  val replayServices: Boolean = false,
+  val misalignServices: Boolean = false
+)(implicit p: Parameters) extends UserTimerDeliveryHarness {
   val loads = Seq.fill(backendParams.LduCnt)(withReset(reset.asAsyncReset) { Module(new LoadUnit) })
   val queue = withReset(reset.asAsyncReset) { Module(new LoadQueue) }
+  private val misalignLane = 1
+  private val misalignBuffer = Option.when(misalignServices) {
+    require(loads.size > misalignLane && loads.size == LoadPipelineWidth)
+    withReset(reset.asAsyncReset) { Module(new LoadMisalignBuffer) }
+  }
   private val tlbWidth = backendParams.LduCnt + backendParams.HyuCnt + 1
   val tlb = withReset(reset.asAsyncReset) { Module(new TLBNonBlock(tlbWidth, 2, ldtlbParams)) }
   require(backendParams.HyuCnt == 0 && !EnableLoadToLoadForward)
@@ -104,6 +112,25 @@ class FDILoadPermissionBackendHarness(val replayServices: Boolean = false)(impli
         val lq = new LqPtr
         val fullva = UInt(XLEN.W)
       })))
+    })
+    // The optional fixture exposes real MAB and queue transactions. Only the
+    // PTW replay hint is supplied by the external memory-service model.
+    val misalign = Option.when(misalignServices)(new Bundle {
+      val allocation = Output(Vec(RenameWidth, Valid(new DynInst)))
+      val enqueued = Output(Vec(loads.size, Valid(new LqWriteBundle)))
+      val request = Output(Valid(new LsPipelineBundle))
+      val response = Output(Valid(new LqWriteBundle))
+      val writeback = Output(Valid(new MemExuOutput))
+      val full = Output(Bool())
+      val state = Output(UInt(3.W))
+      val owner = Output(Valid(new LqWriteBundle))
+      val attempt = Output(Vec(loads.size, Valid(new LqWriteBundle)))
+      val tlbRequest = Output(Vec(loads.size, Valid(chiselTypeOf(loads.head.io.tlb.req.bits))))
+      val tlbResponse = Output(Vec(loads.size, Valid(new TlbResp(2))))
+      val tlbHint = Flipped(Valid(new TLBHintResp))
+      val cacheS1Kill = Output(Vec(loads.size, Bool()))
+      val queueWrite = Output(Vec(loads.size, Valid(new LqWriteBundle)))
+      val exception = Output(Valid(new LqWriteBundle))
     })
     val requests = Output(Vec(loads.size, Valid(new DCacheWordReq)))
     val issue = Output(Vec(loads.size, Valid(new MemExuInput)))
@@ -208,6 +235,7 @@ class FDILoadPermissionBackendHarness(val replayServices: Boolean = false)(impli
   loads.foreach(load => idleInputs(load.io))
   idleInputs(queue.io)
   idleInputs(tlb.io)
+  misalignBuffer.foreach(buffer => idleInputs(buffer.io))
   memory.retry.foreach { service =>
     service.residents.zipWithIndex.foreach { case (resident, index) =>
       resident.valid := observe(queue.loadQueueReplay.allocated(index))
@@ -301,14 +329,53 @@ class FDILoadPermissionBackendHarness(val replayServices: Boolean = false)(impli
     queue.io.enq.req(index).bits.sqIdx := 0.U.asTypeOf(new SqPtr)
     backend.io.mem.lsqEnqIO.resp(index).lqIdx := queue.io.enq.resp(index)
     backend.io.mem.lsqEnqIO.resp(index).sqIdx := 0.U.asTypeOf(new SqPtr)
+    memory.misalign.foreach { service =>
+      val request = queue.io.enq.req(index)
+      service.allocation(index).valid := request.valid && queue.io.enq.canAccept &&
+        queue.io.enq.sqCanAccept && !request.bits.robIdx.needFlush(backend.io.mem.redirect)
+      service.allocation(index).bits := request.bits
+      service.allocation(index).bits.lqIdx := queue.io.enq.resp(index)
+    }
   }
   queue.io.sq.sqEmpty := true.B
   queue.io.sq.stAddrReadyVec.foreach(_ := true.B)
   queue.io.sq.stDataReadyVec.foreach(_ := true.B)
   queue.io.exceptionAddr.isStore := false.B
-  backend.io.mem.exceptionAddr.vaddr := queue.io.exceptionAddr.vaddr
-  backend.io.mem.exceptionAddr.gpaddr := queue.io.exceptionAddr.gpaddr
-  backend.io.mem.exceptionAddr.isForVSnonLeafPTE := queue.io.exceptionAddr.isForVSnonLeafPTE
+  if (misalignServices) {
+    // Match MemBlock's scalar address selection, extension and output register.
+    // The MAB can only override through its production output; the fixture
+    // never synthesizes an exception or injects a terminal queue transaction.
+    val overwrite = misalignBuffer.get.io.overwriteExpBuf
+    val queued = queue.io.exceptionAddr
+    val address = Mux(overwrite.valid, overwrite.vaddr, queued.vaddr)
+    val needExtension = overwrite.valid || queued.vaNeedExt
+    val isHyper = Mux(overwrite.valid, overwrite.isHyper, queued.isHyper)
+    val isVirtual = context.priv.virt || isHyper
+    val machine = context.priv.dmode === 3.U
+    val useBare = isVirtual && context.vsatp.mode === 0.U && context.hgatp.mode === 0.U ||
+      !isVirtual && (machine || context.satp.mode === 0.U)
+    val useSv39 = isVirtual && context.vsatp.mode === 8.U ||
+      !isVirtual && !machine && context.satp.mode === 8.U
+    val useSv48 = isVirtual && context.vsatp.mode === 9.U ||
+      !isVirtual && !machine && context.satp.mode === 9.U
+    val useSv39x4 = isVirtual && context.vsatp.mode === 0.U && context.hgatp.mode === 8.U
+    val useSv48x4 = isVirtual && context.vsatp.mode === 0.U && context.hgatp.mode === 9.U
+    val extended = Mux1H(Seq(
+      useBare -> ZeroExt(address(PAddrBits - 1, 0), XLEN),
+      useSv39 -> SignExt(address(38, 0), XLEN),
+      useSv48 -> SignExt(address(47, 0), XLEN),
+      useSv39x4 -> ZeroExt(address(40, 0), XLEN),
+      useSv48x4 -> ZeroExt(address(49, 0), XLEN)
+    ))
+    backend.io.mem.exceptionAddr.vaddr := RegNext(Mux(needExtension, extended, address))
+    backend.io.mem.exceptionAddr.gpaddr := RegNext(Mux(overwrite.valid, overwrite.gpaddr, queued.gpaddr))
+    backend.io.mem.exceptionAddr.isForVSnonLeafPTE := RegNext(
+      Mux(overwrite.valid, overwrite.isForVSnonLeafPTE, queued.isForVSnonLeafPTE))
+  } else {
+    backend.io.mem.exceptionAddr.vaddr := queue.io.exceptionAddr.vaddr
+    backend.io.mem.exceptionAddr.gpaddr := queue.io.exceptionAddr.gpaddr
+    backend.io.mem.exceptionAddr.isForVSnonLeafPTE := queue.io.exceptionAddr.isForVSnonLeafPTE
+  }
   queue.io.uncache.req.ready := true.B
   queue.io.noUopsIssed := !VecInit(backend.io.mem.issueLda.map(_.valid)).asUInt.orR
   queue.io.tlbReplayDelayCycleCtrl.foreach(_ := 0.U)
@@ -316,9 +383,75 @@ class FDILoadPermissionBackendHarness(val replayServices: Boolean = false)(impli
   memory.queueCancel := queue.io.lqCancelCnt
   memory.uncacheRequest := queue.io.uncache.req.valid
 
+  misalignBuffer.foreach { buffer =>
+    val service = memory.misalign.get
+    buffer.io.redirect := backend.io.mem.redirect
+    // The queue remains the sole driver of the ROB's mmio/uop return signals.
+    buffer.io.rob.lcommit := backend.io.mem.robLsqIO.lcommit
+    buffer.io.rob.scommit := backend.io.mem.robLsqIO.scommit
+    buffer.io.rob.pendingMMIOld := backend.io.mem.robLsqIO.pendingMMIOld
+    buffer.io.rob.pendingld := backend.io.mem.robLsqIO.pendingld
+    buffer.io.rob.pendingst := backend.io.mem.robLsqIO.pendingst
+    buffer.io.rob.pendingVst := backend.io.mem.robLsqIO.pendingVst
+    buffer.io.rob.commit := backend.io.mem.robLsqIO.commit
+    buffer.io.rob.pendingPtr := backend.io.mem.robLsqIO.pendingPtr
+    buffer.io.rob.pendingPtrNext := backend.io.mem.robLsqIO.pendingPtrNext
+    buffer.io.vecWriteBack.ready := true.B
+    assert(!buffer.io.vecWriteBack.valid, "The scalar misalignment fixture does not accept vector loads")
+
+    val allowSpeculation = RegInit(true.B)
+    val rejectedSpeculation = loads.map(load => load.io.lsq.ldin.bits.isFrmMisAlignBuf &&
+      load.io.lsq.ldin.bits.rep_info.rar_nack && load.io.rollback.valid).reduce(_ || _)
+    when(rejectedSpeculation) {
+      allowSpeculation := false.B
+    }.elsewhen(queue.io.rarValidCount < (LoadQueueRARSize - 4).U) {
+      allowSpeculation := true.B
+    }
+    loads.foreach(_.io.misalign_allow_spec := allowSpeculation)
+    queue.io.misalignAllowSpec := allowSpeculation
+    queue.io.loadMisalignFull := buffer.io.loadMisalignFull
+    queue.io.tlb_hint.resp := service.tlbHint
+
+    // Preserve MemBlock's ROB-age selection and same-age port priority.
+    val redirects = loads.map(_.io.rollback) ++ queue.io.nack_rollback ++ queue.io.nuke_rollback
+    val selected = Redirect.selectOldestRedirect(redirects)
+    val redirect = WireDefault(Mux1H(selected, redirects))
+    redirect.bits.cfiUpdate.backendIAF := false.B
+    redirect.bits.cfiUpdate.backendIPF := false.B
+    redirect.bits.cfiUpdate.backendIGPF := false.B
+    backend.io.mem.memoryViolation := redirect
+
+    service.request.valid := buffer.io.splitLoadReq.fire
+    service.request.bits := buffer.io.splitLoadReq.bits
+    service.response := buffer.io.splitLoadResp
+    service.writeback.valid := buffer.io.writeBack.fire
+    service.writeback.bits := buffer.io.writeBack.bits
+    service.full := buffer.io.loadMisalignFull
+    service.state := observe(buffer.bufferState)
+    service.owner.valid := observe(buffer.req_valid)
+    service.owner.bits := observe(buffer.req)
+    service.exception.valid := observe(queue.exceptionBuffer.req_valid)
+    service.exception.bits := observe(queue.exceptionBuffer.req)
+  }
+
   loads.zipWithIndex.foreach { case (load, lane) =>
     load.io.ldin <> backend.io.mem.issueLda(lane)
-    backend.io.mem.writebackLda(lane) <> load.io.ldout
+    if (misalignServices && lane == misalignLane) {
+      val buffer = misalignBuffer.get
+      val output = backend.io.mem.writebackLda(lane)
+      output.valid := load.io.ldout.valid || buffer.io.writeBack.valid
+      output.bits := Mux(load.io.ldout.valid, load.io.ldout.bits, buffer.io.writeBack.bits)
+      output.bits.isFromLoadUnit := load.io.ldout.bits.isFromLoadUnit || buffer.io.writeBack.valid
+      load.io.ldout.ready := output.ready
+      buffer.io.writeBack.ready := output.ready && !load.io.ldout.valid
+      buffer.io.loadOutValid := load.io.ldout.valid
+      buffer.io.loadVecOutValid := load.io.vecldout.valid
+      load.io.misalign_ldin <> buffer.io.splitLoadReq
+      load.io.misalign_ldout <> buffer.io.splitLoadResp
+    } else {
+      backend.io.mem.writebackLda(lane) <> load.io.ldout
+    }
+    misalignBuffer.foreach(_.io.enq(lane) <> load.io.misalign_enq)
     backend.io.mem.ldaIqFeedback(lane).feedbackSlow := load.io.feedback_slow
     backend.io.mem.wakeup(lane) := load.io.wakeup
     backend.io.mem.otherFastWakeup(lane) := load.io.fast_uop
@@ -363,8 +496,23 @@ class FDILoadPermissionBackendHarness(val replayServices: Boolean = false)(impli
     memory.requests(lane).bits := load.io.dcache.req.bits
     memory.issue(lane).valid := load.io.ldin.fire
     memory.issue(lane).bits := load.io.ldin.bits
-    memory.completion(lane).valid := load.io.ldout.fire
-    memory.completion(lane).bits := load.io.ldout.bits
+    val completed = if (misalignServices) backend.io.mem.writebackLda(lane) else load.io.ldout
+    memory.completion(lane).valid := completed.fire
+    memory.completion(lane).bits := completed.bits
+    memory.misalign.foreach { service =>
+      service.enqueued(lane).valid := load.io.misalign_enq.req.fire &&
+        !load.io.misalign_enq.req.bits.uop.robIdx.needFlush(backend.io.mem.redirect)
+      service.enqueued(lane).bits := load.io.misalign_enq.req.bits
+      service.attempt(lane).valid := observe(load.s0_fire)
+      service.attempt(lane).bits := observe(load.s0_out)
+      service.tlbRequest(lane).valid := load.io.tlb.req.fire
+      service.tlbRequest(lane).bits := load.io.tlb.req.bits
+      service.tlbResponse(lane).valid := load.io.tlb.resp.valid
+      service.tlbResponse(lane).bits := load.io.tlb.resp.bits
+      service.cacheS1Kill(lane) := load.io.dcache.s1_kill
+      service.queueWrite(lane).valid := load.io.lsq.ldin.valid
+      service.queueWrite(lane).bits := load.io.lsq.ldin.bits
+    }
     memory.noData(lane) := (if (HasFDI) observe(load.s2_valid) && observe(load.s2_fdiBlocked) else false.B)
     memory.ld1Cancel(lane) := load.io.ldCancel.ld1Cancel
     memory.ld2Cancel(lane) := load.io.ldCancel.ld2Cancel

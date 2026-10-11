@@ -173,6 +173,7 @@ class IPrefetchPipe(implicit p: Parameters) extends IPrefetchModule with HasICac
   (0 until PortNumber).foreach { i =>
     toITLB(i).valid             := s1_need_itlb(i) || (s0_valid && (if (i == 0) true.B else s0_doubleline))
     toITLB(i).bits              := DontCare
+    toITLB(i).bits.fullvaKind    := xiangshan.cache.mmu.TlbFullvaKind.Raw
     toITLB(i).bits.size         := 3.U
     toITLB(i).bits.vaddr        := Mux(s1_need_itlb(i), s1_req_vaddr(i), s0_req_vaddr(i))
     toITLB(i).bits.debug.pc     := Mux(s1_need_itlb(i), s1_req_vaddr(i), s0_req_vaddr(i))

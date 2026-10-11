@@ -208,6 +208,7 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   io.tlb.req.valid                   := s0_valid
   io.tlb.req.bits.vaddr              := s0_vaddr
   io.tlb.req.bits.fullva             := s0_fullva
+  io.tlb.req.bits.fullvaKind         := xiangshan.cache.mmu.TlbFullvaKind.Raw
   io.tlb.req.bits.checkfullva        := s0_use_flow_rs || s0_use_flow_vec
   io.tlb.req.bits.cmd                := TlbCmd.write
   io.tlb.req.bits.isPrefetch         := s0_use_flow_prf

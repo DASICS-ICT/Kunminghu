@@ -268,6 +268,7 @@ class HybridUnit(implicit p: Parameters) extends XSModule
                                          Mux(s0_ld_flow, TlbCmd.read, TlbCmd.write)
                                        )
   io.tlb.req.bits.vaddr              := Mux(s0_hw_prf_select, io.ldu_io.prefetch_req.bits.paddr, s0_vaddr)
+  io.tlb.req.bits.fullvaKind         := xiangshan.cache.mmu.TlbFullvaKind.Raw
   io.tlb.req.bits.size               := Mux(s0_isvec, io.vec_stu_io.in.bits.alignedType(1, 0), LSUOpType.size(s0_uop.fuOpType)) // may broken if use it in feature
   io.tlb.req.bits.kill               := s0_kill
   io.tlb.req.bits.memidx.is_ld       := s0_ld_flow

@@ -7,13 +7,19 @@ import chisel3.util.experimental.BoringUtils.{bore => observe}
 import difftest._
 import freechips.rocketchip.diplomacy.DisableMonitors
 import org.chipsalliance.cde.config.Parameters
-import utility.{ChiselDB, Constantin, FileRegisters}
-import xiangshan.{DebugOptionsKey, XSTileKey}
-import xiangshan.backend.fu.wrapper.CSR
+import utility.{ChiselDB, Constantin, FileRegisters, SignExt}
+import xiangshan.{DebugOptionsKey, ExceptionNO, JumpOpType, XSTileKey}
+import xiangshan.backend.fu.wrapper.{CSR, JumpUnit}
 
 object FDIReferenceObservations {
+  // Jump data.pc is the FTQ block base. Reconstruct the instruction address
+  // from the same accepted input, independently of the computed link effect.
+  def callSourcePC(input: FuncUnitInput): UInt =
+    SignExt(input.data.pc.get, 64) + (input.ctrl.ftqOffset.get << input.instOffsetBits)
+
   /** Observe the actual CSR producer and the already allocated UIT identities. */
-  def connect(csr: CSR, identities: UserTimerReferenceObserver): FDIReferenceObserver = {
+  def connect(csr: CSR, identities: UserTimerReferenceObserver,
+    jumps: Seq[JumpUnit] = Seq.empty): FDIReferenceObserver = {
     val bank = csr.csrMod
     require(bank.coreParams.HasFDI, "FDI producer requires the enabled production bank")
     require(FDIReferenceProjection.addresses.forall(bank.csrOutMap.contains),
@@ -62,6 +68,43 @@ object FDIReferenceObservations {
     in.writes := VecInit(FDIReferenceProjection.addresses.map(address =>
       observe(bank.csrRwMap(address)._1.wen))).asUInt
 
+    in.call := 0.U.asTypeOf(in.call)
+    // NewCSR accepts this sink in the same cycle whenever its reset is low.
+    // The following bank snapshot independently verifies the owner's update.
+    in.callWrite := observe(bank.io.fdiCallReturnPC.get.valid) && !observe(bank.reset).asBool
+    in.callIllegal := false.B
+    if (jumps.nonEmpty) {
+      // Capture the accepted Jump transaction, not the implicit-effect pulse:
+      // a missing effect must leave an observable comparison obligation.
+      val calls = jumps.map { jump =>
+        val input = observe(jump.io.in.bits)
+        val output = observe(jump.io.out.bits)
+        val operation = input.ctrl.fuOpType
+        val accepted = observe(jump.io.out.valid) && observe(jump.io.out.ready) &&
+          (operation === JumpOpType.fdicallJ || operation === JumpOpType.fdicallJR)
+        val call = Wire(new FDIReferenceRequest()(bank.p))
+        val ptr = input.ctrl.robIdx
+        val illegal = output.ctrl.exceptionVec.get(ExceptionNO.illegalInstr)
+        call.ptr := ptr
+        call.uid := ids(ptr.value)
+        call.live := live(ptr.value) && flags(ptr.value) === ptr.flag
+        call.instruction := instructions(ptr.value)
+        call.pc := callSourcePC(input)
+        call.address := "h8b1".U
+        call.read := false.B
+        call.write := true.B
+        call.permitted := !illegal
+        (accepted, call, illegal)
+      }
+      val accepted = calls.map(_._1)
+      in.call.valid := VecInit(accepted).asUInt.orR
+      in.call.bits := Mux1H(accepted, calls.map(_._2))
+      in.callIllegal := Mux1H(accepted, calls.map(_._3))
+      when(!in.coreReset) {
+        assert(PopCount(VecInit(accepted)) <= 1.U, "FDI observation saw simultaneous call acceptances")
+      }
+    }
+
     val architecturalTrap = identities.io.architecturalTrap
     val trapInstruction = RegEnable(Mux(identities.io.huEffect, 0.U,
       observe(bank.io.fromRob.trap.bits.instr)), architecturalTrap)
@@ -79,9 +122,10 @@ object FDIReferenceObservations {
     observer
   }
 
-  def attach(csr: CSR, identities: UserTimerReferenceObserver, hartId: UInt): Unit = {
+  def attach(csr: CSR, identities: UserTimerReferenceObserver, hartId: UInt,
+    jumps: Seq[JumpUnit] = Seq.empty): Unit = {
     if (csr.csrMod.coreParams.HasFDI) {
-      val observer = connect(csr, identities)
+      val observer = connect(csr, identities, jumps)
       for (lane <- 0 until 4) {
         val packet = DifftestModule(new DiffFDIObservation, delay = 0)
         packet.coreid := hartId
@@ -97,8 +141,13 @@ object FDIReferenceObservations {
 /** The same real core/UID observer supplies both independent reference channels. */
 class FDIReferenceSimTop(implicit val referenceParameters: Parameters) extends top.SimTop()(referenceParameters) {
   override def desiredName: String = "SimTop"
-  override protected def addDifftestObservations(): Unit =
-    UserTimerReferenceObservations.attach(this, FDIReferenceObservations.attach)
+  override protected def addDifftestObservations(): Unit = {
+    val jumps = l_soc.core_with_l2.head.core.backend.inner.intExuBlock.get.exus.flatMap(
+      _.module.funcUnits.collect { case jump: JumpUnit => jump })
+    require(jumps.nonEmpty, "FDI full-core observations require the real Jump units")
+    UserTimerReferenceObservations.attach(this,
+      (csr, identities, hartId) => FDIReferenceObservations.attach(csr, identities, hartId, jumps))
+  }
 }
 
 object FDIReferenceMain extends App {

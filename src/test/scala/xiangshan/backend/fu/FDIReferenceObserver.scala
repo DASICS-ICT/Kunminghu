@@ -18,6 +18,8 @@ object FDIReferenceProjection {
   val post = 3
   val trap = 4
   val cancel = 5
+  val callPre = 6
+  val callPost = 7
 }
 
 class FDIReferenceRequest(implicit p: Parameters) extends XSBundle {
@@ -52,6 +54,11 @@ class FDIReferenceObserver(implicit p: Parameters) extends XSModule {
     val cycle = Input(UInt(64.W))
     val bank = Input(Vec(52, UInt(64.W)))
     val request = Input(Valid(new FDIReferenceRequest))
+    // Calls accept and update ReturnPC on the same edge. Their obligation is
+    // driven by the FU handshake, independently of the implicit write signal.
+    val call = Input(Valid(new FDIReferenceRequest))
+    val callWrite = Input(Bool())
+    val callIllegal = Input(Bool())
     val responseValid = Input(Bool())
     val responseIllegal = Input(Bool())
     val responseVirtual = Input(Bool())
@@ -69,7 +76,8 @@ class FDIReferenceObserver(implicit p: Parameters) extends XSModule {
   private val resetNow = active && !resetSeen
   when(resetSeen && io.coreReset) { assert(false.B, "FDI observer does not support warm reset") }
   when(resetNow) {
-    assert(!io.request.valid && !io.writes.orR, "FDI reset proof must precede guest access")
+    assert(!io.request.valid && !io.call.valid && !io.writes.orR && !io.callWrite,
+      "FDI reset proof must precede guest access")
     resetSeen := true.B
     resetWords := io.bank
     io.bank.foreach(word => assert(word === 0.U, "FDI natural reset state is polluted"))
@@ -77,9 +85,14 @@ class FDIReferenceObserver(implicit p: Parameters) extends XSModule {
   // The captured proof is never refreshed from a later all-zero architectural state.
   dontTouch(resetWords)
 
-  private val request = io.request.bits
-  private val requestKilled = request.ptr.needFlush(io.flush)
-  private val accepted = active && resetSeen && io.request.valid && !requestKilled
+  private val csrAccepted = active && resetSeen && io.request.valid && !io.request.bits.ptr.needFlush(io.flush)
+  private val callAccepted = active && resetSeen && io.call.valid && !io.call.bits.ptr.needFlush(io.flush)
+  private val accepted = csrAccepted || callAccepted
+  private val request = Mux(callAccepted, io.call.bits, io.request.bits)
+  when(active) {
+    assert(!(csrAccepted && callAccepted), "FDI serialized CSR and call acceptances collided")
+    assert(!(io.writes.orR && io.callWrite), "FDI software and call effects collided")
+  }
   private val ownerLive = RegInit(false.B)
   private val owner = Reg(new FDIObservation)
   private val ownerPtr = Reg(new RobPtr)
@@ -97,7 +110,7 @@ class FDIReferenceObserver(implicit p: Parameters) extends XSModule {
   private val pre = Wire(new FDIObservation)
   pre := 0.U.asTypeOf(pre)
   pre.valid := accepted
-  pre.kind := FDIReferenceProjection.pre.U
+  pre.kind := Mux(callAccepted, FDIReferenceProjection.callPre.U, FDIReferenceProjection.pre.U)
   pre.epoch := io.epoch
   pre.uid := request.uid
   pre.robIdx := request.ptr.value
@@ -120,9 +133,9 @@ class FDIReferenceObserver(implicit p: Parameters) extends XSModule {
     io.packets(0).words := io.bank
   }
 
-  // All six FDI CSR forms retain waitForward/blockBackward in DecodeUnit.
-  // NewDispatch admits them into an empty ROB; Rob blocks younger enqueue
-  // until that owner leaves. One retained owner therefore covers every cancel.
+  // FDI CSR forms and calls retain waitForward/blockBackward in DecodeUnit.
+  // They enter an empty ROB and prevent younger enqueue until their owner
+  // leaves. The shared owner therefore covers both lifecycles without a queue.
   when(accepted) {
     assert(request.live && request.uid =/= 0.U, "FDI acceptance has no real live ROB identity")
     assert(!ownerLive || ownerRetired, "FDI serialized CSR owner was overwritten")
@@ -150,9 +163,9 @@ class FDIReferenceObserver(implicit p: Parameters) extends XSModule {
   }
 
   // C0 acceptance creates a C1 obligation even if the production write is absent.
-  private val c1Valid = RegNext(accepted, false.B)
-  private val c1 = RegEnable(pre, accepted)
-  private val c1Ptr = RegEnable(request.ptr, accepted)
+  private val c1Valid = RegNext(csrAccepted, false.B)
+  private val c1 = RegEnable(pre, csrAccepted)
+  private val c1Ptr = RegEnable(request.ptr, csrAccepted)
   private val c1Killed = c1Ptr.needFlush(io.flush)
   private val c2Valid = RegNext(active && c1Valid && !c1Killed, false.B)
   private val c2 = RegEnable(c1, c1Valid)
@@ -182,19 +195,49 @@ class FDIReferenceObserver(implicit p: Parameters) extends XSModule {
   io.packets(1).responseVirtual := c2Virtual
   io.packets(1).words := io.bank
 
+  // The implicit owner writes at C0; its C1 post samples the real bank even
+  // when the write was absent or the call completed with an illegal fault.
+  private val callPostValid = RegNext(callAccepted, false.B)
+  private val callPost = RegEnable(pre, callAccepted)
+  private val callPostWrite = RegEnable(io.callWrite, callAccepted)
+  private val callPostIllegal = RegEnable(io.callIllegal, callAccepted)
+  when(active && io.callWrite) {
+    assert(callAccepted && request.permitted && !io.callIllegal,
+      "FDI implicit write has no legal accepted call")
+  }
+  when(callAccepted) {
+    assert(request.address === "h8b1".U && !request.read && request.write,
+      "FDI call observation changed its implicit write owner")
+    ownerEffect := io.callWrite
+    ownerIllegal := io.callIllegal
+    ownerVirtual := false.B
+  }
+  when(active && callPostValid) {
+    assert(!c2Valid, "FDI CSR and call post observations collided")
+    assert(ownerLive && owner.uid === callPost.uid, "FDI call post changed owner")
+    io.packets(1) := callPost
+    io.packets(1).valid := true.B
+    io.packets(1).kind := FDIReferenceProjection.callPost.U
+    io.packets(1).cycle := io.cycle
+    io.packets(1).actualWrite := callPostWrite
+    io.packets(1).responseIllegal := callPostIllegal
+    io.packets(1).responseVirtual := false.B
+    io.packets(1).words := io.bank
+  }
+
   // Cancellation carries the actual bank at the redirect, including faults whose
   // C2 snapshot already exists. The host retains synchronous faults until trap.
   io.packets(3) := owner
   io.packets(3).valid := ownerKilled
   io.packets(3).kind := FDIReferenceProjection.cancel.U
   io.packets(3).cycle := io.cycle
-  io.packets(3).actualWrite := ownerEffect || io.writes.orR
+  io.packets(3).actualWrite := ownerEffect || io.writes.orR || io.callWrite
   io.packets(3).responseIllegal := Mux(c1Valid, io.responseIllegal, ownerIllegal)
   io.packets(3).responseVirtual := Mux(c1Valid, io.responseVirtual, ownerVirtual)
   io.packets(3).cancelReason := Mux(isBoundary, Mux(boundaryInterrupt, 3.U, 2.U), 1.U)
   io.packets(3).words := io.bank
   when(ownerKilled) {
-    assert(!ownerEffect && !io.writes.orR, "FDI applied architectural write was discarded")
+    assert(!ownerEffect && !io.writes.orR && !io.callWrite, "FDI applied architectural write was discarded")
     ownerLive := false.B
   }
 

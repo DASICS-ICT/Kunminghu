@@ -92,6 +92,48 @@ class FDITrapPCObservationHarness(implicit p: Parameters) extends Module {
   io.snapshotPC := shared.io.snapshot.pc
 }
 
+/** Exercise the same source-PC tap with an actual Jump input and link result. */
+class FDIReferenceCallSourceHarness(implicit p: Parameters) extends XSModule {
+  val io = IO(new Bundle {
+    val valid = Input(Bool())
+    val ready = Input(Bool())
+    val base = Input(UInt(64.W))
+    val offset = Input(UInt(log2Ceil(PredictWidth).W))
+    val indirect = Input(Bool())
+    val illegal = Input(Bool())
+    val accepted = Output(Bool())
+    val sourcePC = Output(UInt(64.W))
+    val effect = Output(Bool())
+    val link = Output(UInt(64.W))
+    val responseIllegal = Output(Bool())
+  })
+  val jump = Module(new wrapper.JumpUnit(FuConfig.JmpCfg))
+  jump.io.in.bits := 0.U.asTypeOf(jump.io.in.bits)
+  jump.io.in.valid := io.valid
+  jump.io.out.ready := io.ready
+  jump.io.flush := 0.U.asTypeOf(jump.io.flush)
+  jump.io.instrAddrTransType.get := 0.U.asTypeOf(jump.io.instrAddrTransType.get)
+  jump.io.fdiSource.get := 0.U.asTypeOf(jump.io.fdiSource.get)
+  jump.io.fdiSource.get.sourcePrivilege := FDISourcePrivilege.User
+  jump.io.fdiSource.get.policy.uEnable := true.B
+  jump.io.fdiTargets.get := 0.U.asTypeOf(jump.io.fdiTargets.get)
+  jump.io.in.bits.ctrl.fuOpType := Mux(io.indirect, JumpOpType.fdicallJR, JumpOpType.fdicallJ)
+  jump.io.in.bits.ctrl.ftqOffset.get := io.offset
+  jump.io.in.bits.ctrl.fdiNotTrusted.get := io.illegal
+  jump.io.in.bits.ctrl.fdiInstr.get := Mux(io.indirect, "h0002908b".U, "h0000000b".U)
+  jump.io.in.bits.ctrl.rfWen.get := true.B
+  jump.io.in.bits.data.pc.get := io.base
+  // All calls are 32-bit; an odd halfword offset represents a compressed neighbour.
+  jump.io.in.bits.data.nextPcOffset.get := io.offset +& 2.U
+  jump.io.in.bits.data.src(0) := "h80012000".U
+  jump.io.in.bits.data.imm := Mux(io.indirect, 0.U, io.offset << instOffsetBits)
+  io.accepted := jump.io.out.fire
+  io.sourcePC := FDIReferenceObservations.callSourcePC(jump.io.in.bits)
+  io.effect := jump.io.fdiCallReturnPC.get.valid
+  io.link := jump.io.fdiCallReturnPC.get.bits
+  io.responseIllegal := jump.io.out.bits.ctrl.exceptionVec.get(ExceptionNO.illegalInstr)
+}
+
 class FDIReferenceObserverTest extends AnyFlatSpec with ChiselScalatestTester {
   private def parameters(enabled: Boolean): Parameters = {
     val base = new top.DefaultConfig
@@ -355,6 +397,7 @@ class FDIReferenceObserverTest extends AnyFlatSpec with ChiselScalatestTester {
     test(new FDIReferenceObserver).withAnnotations(Seq(
       VerilatorBackendAnnotation, TargetDirAnnotation("fdi-observer-lifecycle"))) { dut =>
       clear(dut.io.request); clear(dut.io.bank); clear(dut.io.flush); clear(dut.io.retired)
+      clear(dut.io.call); dut.io.callWrite.poke(false.B); dut.io.callIllegal.poke(false.B)
       clear(dut.io.boundary); clear(dut.io.trap)
       dut.io.epoch.poke(1.U); dut.io.cycle.poke(0.U); dut.io.writes.poke(0.U)
       dut.io.responseValid.poke(false.B); dut.io.responseIllegal.poke(false.B)
@@ -405,6 +448,7 @@ class FDIReferenceObserverTest extends AnyFlatSpec with ChiselScalatestTester {
     test(new FDIReferenceObserver).withAnnotations(Seq(
       VerilatorBackendAnnotation, TargetDirAnnotation("fdi-observer-boundary"))) { dut =>
       clear(dut.io.request); clear(dut.io.bank); clear(dut.io.flush); clear(dut.io.retired)
+      clear(dut.io.call); dut.io.callWrite.poke(false.B); dut.io.callIllegal.poke(false.B)
       clear(dut.io.boundary); clear(dut.io.trap)
       dut.io.epoch.poke(1.U); dut.io.writes.poke(0.U)
       dut.io.responseValid.poke(false.B); dut.io.responseIllegal.poke(false.B)
@@ -496,11 +540,128 @@ class FDIReferenceObserverTest extends AnyFlatSpec with ChiselScalatestTester {
     }
   }
 
+  it should "retain accepted call obligations through delayed retirement and illegal cancellation" in {
+    implicit val p: Parameters = parameters(true)
+    test(new FDIReferenceObserver).withAnnotations(Seq(
+      VerilatorBackendAnnotation, TargetDirAnnotation("fdi-observer-calls"))) { dut =>
+      clear(dut.io.request); clear(dut.io.call); clear(dut.io.bank)
+      clear(dut.io.flush); clear(dut.io.retired); clear(dut.io.boundary); clear(dut.io.trap)
+      dut.io.callWrite.poke(false.B); dut.io.callIllegal.poke(false.B)
+      dut.io.responseValid.poke(false.B); dut.io.responseIllegal.poke(false.B)
+      dut.io.responseVirtual.poke(false.B); dut.io.writes.poke(0.U)
+      dut.io.epoch.poke(1.U); dut.io.coreReset.poke(true.B)
+      var cycle = 0
+      def edge(): Unit = { dut.clock.step(); cycle += 1; dut.io.cycle.poke(cycle.U) }
+      dut.io.cycle.poke(0.U); edge(); edge()
+      dut.io.coreReset.poke(false.B); edge()
+      val call = dut.io.call
+      def offer(uid: Int, legal: Boolean, effect: Boolean): Unit = {
+        call.valid.poke(true.B)
+        call.bits.ptr.value.poke(4.U); call.bits.ptr.flag.poke((uid % 2 == 0).B)
+        call.bits.uid.poke(uid.U); call.bits.live.poke(true.B)
+        call.bits.pc.poke((0x80000000L + 4 * uid).U)
+        call.bits.instruction.poke(0x108b.U)
+        call.bits.address.poke(0x8b1.U); call.bits.read.poke(false.B)
+        call.bits.write.poke(true.B); call.bits.permitted.poke(legal.B)
+        dut.io.callWrite.poke(effect.B); dut.io.callIllegal.poke((!legal).B)
+      }
+      def withdraw(): Unit = {
+        call.valid.poke(false.B); dut.io.callWrite.poke(false.B); dut.io.callIllegal.poke(false.B)
+      }
+      offer(1, legal = true, effect = true)
+      val acceptedCycle = cycle
+      dut.io.packets(0).valid.expect(true.B); dut.io.packets(0).kind.expect(6.U)
+      dut.io.packets(0).uid.expect(1.U); dut.io.packets(0).words(40).expect(0.U)
+      edge(); withdraw(); dut.io.bank(40).poke(0x80000008L.U)
+      dut.io.packets(1).valid.expect(true.B); dut.io.packets(1).kind.expect(7.U)
+      dut.io.packets(1).cycle.expect((acceptedCycle + 1).U)
+      dut.io.packets(1).uid.expect(1.U); dut.io.packets(1).actualWrite.expect(true.B)
+      dut.io.packets(1).words(40).expect(0x80000008L.U)
+      edge()
+      // Invalid live operands cannot replace the completed call awaiting retirement.
+      call.bits.uid.poke(99.U); call.bits.pc.poke(0x90000000L.U)
+      for (_ <- 0 until 3) { dut.io.packets.foreach(_.valid.expect(false.B)); edge() }
+      dut.io.retired(0).valid.poke(true.B); dut.io.retired(0).uid.poke(1.U)
+      dut.io.retired(0).robIdx.poke(4.U); dut.io.retired(0).robFlag.poke(false.B)
+      edge(); clear(dut.io.retired)
+
+      offer(2, legal = false, effect = false)
+      dut.io.packets(0).kind.expect(6.U); dut.io.packets(0).permitted.expect(false.B)
+      edge(); withdraw()
+      dut.io.packets(1).valid.expect(true.B); dut.io.packets(1).kind.expect(7.U)
+      dut.io.packets(1).actualWrite.expect(false.B); dut.io.packets(1).responseIllegal.expect(true.B)
+      dut.io.packets(1).words(40).expect(0x80000008L.U)
+      dut.io.boundary.valid.poke(true.B); dut.io.boundary.bits.ptr.value.poke(4.U)
+      dut.io.boundary.bits.ptr.flag.poke(true.B)
+      dut.io.flush.valid.poke(true.B); dut.io.flush.bits.level.poke(RedirectLevel.flush)
+      dut.io.flush.bits.robIdx.value.poke(4.U); dut.io.flush.bits.robIdx.flag.poke(true.B)
+      dut.io.trap.valid.poke(true.B); dut.io.trap.bits.epoch.poke(1.U)
+      dut.io.trap.bits.uid.poke(2.U); dut.io.trap.bits.eventSeq.poke(1.U)
+      dut.io.trap.bits.cycle.poke(cycle.U)
+      dut.io.packets(2).valid.expect(true.B); dut.io.packets(3).valid.expect(true.B)
+      dut.io.packets(3).uid.expect(2.U); dut.io.packets(3).cancelReason.expect(2.U)
+      dut.io.packets(3).responseIllegal.expect(true.B)
+      dut.io.packets(3).words(40).expect(0x80000008L.U)
+      edge(); clear(dut.io.flush); clear(dut.io.boundary); clear(dut.io.trap)
+
+      // An omitted production effect still produces PRE and POST for host rejection.
+      offer(3, legal = true, effect = false)
+      dut.io.packets(0).valid.expect(true.B)
+      edge(); withdraw()
+      dut.io.packets(1).valid.expect(true.B); dut.io.packets(1).kind.expect(7.U)
+      dut.io.packets(1).uid.expect(3.U); dut.io.packets(1).actualWrite.expect(false.B)
+      dut.io.packets(1).responseIllegal.expect(false.B)
+      edge()
+      dut.io.flush.valid.poke(true.B); dut.io.flush.bits.level.poke(RedirectLevel.flush)
+      dut.io.flush.bits.robIdx.value.poke(4.U); dut.io.flush.bits.robIdx.flag.poke(false.B)
+      edge(); clear(dut.io.flush)
+      offer(4, legal = true, effect = false)
+      dut.io.flush.valid.poke(true.B); dut.io.flush.bits.level.poke(RedirectLevel.flush)
+      dut.io.flush.bits.robIdx.value.poke(4.U); dut.io.flush.bits.robIdx.flag.poke(true.B)
+      dut.io.packets(0).valid.expect(false.B)
+      edge(); withdraw(); clear(dut.io.flush)
+      dut.io.packets.foreach(_.valid.expect(false.B))
+    }
+  }
+
+  it should "observe the instruction PC from real Jump block inputs for every accepted call" in {
+    implicit val p: Parameters = parameters(true)
+    test(new FDIReferenceCallSourceHarness).withAnnotations(Seq(
+      VerilatorBackendAnnotation, TargetDirAnnotation("fdi-observer-call-source"))) { dut =>
+      dut.io.valid.poke(false.B); dut.io.ready.poke(false.B)
+      dut.io.base.poke(0.U); dut.io.offset.poke(0.U)
+      dut.io.indirect.poke(true.B); dut.io.illegal.poke(false.B)
+      dut.clock.step(2)
+      val cases = Seq(
+        (BigInt("80010000", 16), 4, true, false, BigInt("80010008", 16)),
+        (BigInt("80020000", 16), 3, false, false, BigInt("80020006", 16)),
+        (BigInt("80030000", 16), 1, true, true, BigInt("80030002", 16)),
+        (BigInt("ffffffc000004000", 16), 5, true, false, BigInt("ffffffc00000400a", 16)),
+        (BigInt("80040000", 16), 0, false, false, BigInt("80040000", 16)))
+      for ((base, offset, indirect, illegal, expectedPC) <- cases) {
+        dut.io.valid.poke(true.B); dut.io.ready.poke(true.B)
+        dut.io.base.poke(base.U); dut.io.offset.poke(offset.U)
+        dut.io.indirect.poke(indirect.B); dut.io.illegal.poke(illegal.B)
+        dut.io.accepted.expect(true.B)
+        dut.io.sourcePC.expect(expectedPC.U)
+        dut.io.responseIllegal.expect(illegal.B)
+        dut.io.effect.expect((!illegal).B)
+        dut.io.link.expect(((expectedPC + 4) & allBits).U)
+        dut.clock.step()
+      }
+      dut.io.ready.poke(false.B)
+      dut.io.accepted.expect(false.B); dut.io.effect.expect(false.B)
+      dut.io.sourcePC.expect(BigInt("80040000", 16).U)
+      dut.clock.step(2)
+    }
+  }
+
   it should "emit no active observation when the production feature is disabled" in {
     implicit val p: Parameters = parameters(false)
     test(new FDIReferenceObserver).withAnnotations(Seq(
       VerilatorBackendAnnotation, TargetDirAnnotation("fdi-observer-disabled"))) { dut =>
       clear(dut.io.request); clear(dut.io.bank); clear(dut.io.flush); clear(dut.io.retired)
+      clear(dut.io.call); dut.io.callWrite.poke(false.B); dut.io.callIllegal.poke(false.B)
       clear(dut.io.boundary); clear(dut.io.trap)
       dut.io.coreReset.poke(false.B); dut.io.epoch.poke(1.U); dut.io.cycle.poke(1.U)
       dut.io.responseValid.poke(false.B); dut.io.responseIllegal.poke(false.B)

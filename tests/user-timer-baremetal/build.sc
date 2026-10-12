@@ -108,6 +108,9 @@ object production extends ProductionModule {
     }
     override def sources = T.sources {
       Seq("top/SimTop.scala", "top/SimMMIO.scala", "top/DasicsDevelopmentMain.scala",
+        "top/DasicsScalarCompareMain.scala",
+        "xiangshan/backend/fu/FDIReferenceMain.scala",
+        "xiangshan/backend/fu/FDIReferenceObserver.scala",
         "xiangshan/backend/fu/UserTimerBaremetalMain.scala",
         "xiangshan/backend/fu/UserTimerReferenceObserver.scala",
         "xiangshan/backend/fu/UserTimerReferenceMain.scala",
